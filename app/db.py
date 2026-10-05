@@ -1,5 +1,8 @@
+from functools import lru_cache
+
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
 
@@ -25,9 +28,22 @@ def database_url() -> str | None:
     )
 
 
+@lru_cache(maxsize=1)
 def _engine():
     url = database_url()
     return create_engine(url, pool_pre_ping=True) if url else None
+
+
+class DatabaseNotConfigured(RuntimeError):
+    pass
+
+
+def session() -> Session:
+    """A new ORM session on the app's database. Use as `with session() as s:`."""
+    engine = _engine()
+    if engine is None:
+        raise DatabaseNotConfigured("no database configured (POSTGRES_PASSWORD unset)")
+    return sessionmaker(engine, expire_on_commit=False)()
 
 
 def check_connection() -> bool:

@@ -9,10 +9,13 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.config import settings
 from app.db import check_connection
 from app.grpc_server import start_grpc_server
+from app.jobs import router as jobs_router
+from app.metrics import router as metrics_router
 
 # Routes reachable without an authenticated session -- everything else is
 # gated by RequireAuthMiddleware below.
-PUBLIC_PATHS = {"/health", "/login", "/auth/callback"}
+# /metrics: Prometheus scrapes it on the home-platform network (app/metrics.py).
+PUBLIC_PATHS = {"/health", "/login", "/auth/callback", "/metrics"}
 
 
 @asynccontextmanager
@@ -35,7 +38,8 @@ class RequireAuthMiddleware(BaseHTTPMiddleware):
     # (no client id/secret in SSM yet), the app stays open rather than locking itself
     # out before auth is even wired up.
     async def dispatch(self, request: Request, call_next):
-        if not _auth_configured or request.url.path in PUBLIC_PATHS:
+        # /jobs/* has its own bearer-token check (app/jobs.py), for Airflow.
+        if not _auth_configured or request.url.path in PUBLIC_PATHS or request.url.path.startswith("/jobs/"):
             return await call_next(request)
         if not request.session.get("user"):
             if request.url.path.startswith("/api/"):
@@ -104,3 +108,7 @@ async def auth_callback(request: Request):
     token = await oauth.authentik.authorize_access_token(request)
     request.session["user"] = token.get("userinfo")
     return RedirectResponse(url="/")
+
+
+app.include_router(jobs_router)
+app.include_router(metrics_router)
