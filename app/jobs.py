@@ -16,10 +16,10 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
-from app import db, quotes
+from app import coverage, db, quotes
 from app.config import settings
 from app.load import LoadError, run_load, run_rebuild
-from app.upstream import GrpcUpstream
+from app.upstream import GrpcCalendars, GrpcUpstream
 
 router = APIRouter(prefix="/jobs")
 
@@ -48,14 +48,29 @@ def _upstream() -> GrpcUpstream:
     return GrpcUpstream(settings.mkt_data_grpc, settings.secmaster_grpc)
 
 
+def _calendars() -> GrpcCalendars:
+    return GrpcCalendars(settings.calendar_grpc)
+
+
+def _refresh_coverage() -> dict:
+    """Coverage after a load. A calendar-svc outage shouldn't fail the load, so it's reported, not raised."""
+    try:
+        with db.session() as s, _calendars() as cal:
+            return coverage.refresh(s, cal)
+    except Exception as e:  # noqa: BLE001 -- reported in the job's answer and the metrics
+        coverage.record_failure(str(e))
+        return {"error": f"{type(e).__name__}: {e}"[:500]}
+
+
 @router.post("/load", dependencies=[Depends(require_token)])
 def load() -> dict:
-    """Load every month mkt-data has new or revised values for. 502 on failure."""
+    """Load every month mkt-data has new or revised values for, then refresh coverage. 502 on failure."""
     try:
         with db.session() as s, _upstream() as up:
-            return run_load(s, up)
+            out = run_load(s, up)
     except LoadError as e:
         raise HTTPException(502, f"load failed: {e}") from None
+    return out | {"coverage": _refresh_coverage()}
 
 
 @router.post("/rebuild", dependencies=[Depends(require_token)])
@@ -63,9 +78,27 @@ def rebuild(source: str = "") -> dict:
     """Re-read every month (of one source, or all) and correct the quotes to match."""
     try:
         with db.session() as s, _upstream() as up:
-            return run_rebuild(s, up, source.upper())
+            out = run_rebuild(s, up, source.upper())
     except LoadError as e:
         raise HTTPException(502, f"rebuild failed: {e}") from None
+    return out | {"coverage": _refresh_coverage()}
+
+
+@router.post("/coverage", dependencies=[Depends(require_token)])
+def refresh_coverage() -> dict:
+    """Recompute coverage now (also done after every load)."""
+    return _refresh_coverage()
+
+
+@router.get("/coverage", dependencies=[Depends(require_read_token)])
+def get_coverage(name: Annotated[list[str] | None, Query()] = None) -> dict:
+    """Each series' first and last date, missing business days with their gaps, and closed-day values."""
+    with db.session() as s:
+        rows = coverage.report(s)
+    if name:
+        wanted = {n.upper() for n in name}
+        rows = [r for r in rows if r["instrument"].upper() in wanted]
+    return {"coverage": rows}
 
 
 def _ids(s, names: list[str]) -> list[int]:

@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from app import jobs
 from app.config import Settings
 from app.main import app
+from tests.fakes import FakeCalendars
 from tests.test_load import _up
 
 client = TestClient(app)
@@ -15,6 +16,7 @@ def _setup(monkeypatch, up=None):
     monkeypatch.setattr(jobs, "settings", Settings(airflow_token="t", read_token="r"))
     up = up or _up()
     monkeypatch.setattr(jobs, "_upstream", lambda: up)
+    monkeypatch.setattr(jobs, "_calendars", FakeCalendars)
     return up
 
 
@@ -27,7 +29,7 @@ def test_load_needs_the_token(migrated_db, monkeypatch):
 def test_load_then_reads(migrated_db, monkeypatch):
     _setup(monkeypatch)
     out = client.post("/jobs/load", headers=AUTH).json()
-    assert out["sources"][0]["added"] == 3
+    assert out["sources"][0]["added"] == 3 and out["coverage"]["series"] == 5  # 10Y: golden, UST-PAR, H15-TCM; 1.5M: golden, UST-PAR
     read = {"Authorization": "Bearer r"}
     series = client.get("/jobs/series", params={"name": "UST-10Y-CMT", "start": "2026-10-01", "end": "2026-10-31"},
                         headers=read).json()["series"][0]
@@ -59,6 +61,27 @@ def test_metrics(migrated_db, monkeypatch):
     assert 'quote_svc_source_disagreements{instrument="UST-10Y-CMT"} 1' in body
     assert 'quote_svc_unmapped_key{source="UST-PAR",key="BC_30YEARDISPLAY"} 1' in body
     assert 'quote_svc_golden_last_date_timestamp_seconds{instrument="UST-10Y-CMT"} 1790899200' in body
+    assert 'quote_svc_source_disagreement_bp{instrument="UST-10Y-CMT",date="2026-10-02",ust_par="0.0412",h15_tcm="0.0413"} -1' in body
+    assert 'quote_svc_coverage_values{instrument="UST-10Y-CMT",series="golden"} 2' in body
+    assert 'quote_svc_coverage_basis{instrument="UST-10Y-CMT",series="UST-PAR",basis="SIFMA-US 2026"} 1' in body
+    assert "quote_svc_coverage_ok 1" in body
+
+
+def test_coverage_endpoint_and_a_calendar_outage(migrated_db, monkeypatch):
+    _setup(monkeypatch)
+
+    class Down(FakeCalendars):
+        def covered_years(self, calendar):
+            raise ConnectionError("calendar-svc unreachable")
+
+    monkeypatch.setattr(jobs, "_calendars", Down)
+    out = client.post("/jobs/load", headers=AUTH).json()
+    assert out["sources"][0]["added"] == 3 and "unreachable" in out["coverage"]["error"]
+    assert "quote_svc_coverage_ok 0" in client.get("/metrics").text
+    monkeypatch.setattr(jobs, "_calendars", FakeCalendars)
+    assert client.post("/jobs/coverage", headers=AUTH).json()["series"] == 5
+    rows = client.get("/jobs/coverage", params={"name": "ust-10y-cmt"}, headers={"Authorization": "Bearer r"}).json()
+    assert {r["series"] for r in rows["coverage"]} == {"golden", "UST-PAR", "H15-TCM"}
 
 
 def test_metrics_without_a_database():

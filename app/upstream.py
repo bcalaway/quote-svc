@@ -80,3 +80,37 @@ class GrpcUpstream:
 
         r = self._sec.ListInstruments(pb.ListInstrumentsRequest(include_inactive=True), timeout=TIMEOUT_SECONDS)
         return {i.sec_id: i.short_name for i in r.instruments}
+
+
+class GrpcCalendars:
+    """calendar-svc (Calendars) over gRPC, for coverage. Use as a context manager."""
+
+    def __init__(self, target: str):
+        self.target = target
+
+    def __enter__(self):
+        import grpc
+
+        from app.grpc_gen import calendars_pb2_grpc
+
+        self._channel = grpc.insecure_channel(self.target)
+        self._stub = calendars_pb2_grpc.CalendarsStub(self._channel)
+        return self
+
+    def __exit__(self, *exc):
+        self._channel.close()
+
+    def covered_years(self, calendar: str) -> set[int]:
+        from app.grpc_gen import calendars_pb2 as pb
+
+        r = self._stub.Coverage(pb.CoverageRequest(calendar=calendar), timeout=TIMEOUT_SECONDS)
+        return {y.year for y in r.years if y.kind != "projected"}
+
+    def closed_days(self, calendar: str, start, end) -> set:
+        from datetime import date
+
+        from app.grpc_gen import calendars_pb2 as pb
+
+        r = self._stub.Closes(pb.ClosesRequest(calendar=calendar, start=start.isoformat(), end=end.isoformat()),
+                              timeout=TIMEOUT_SECONDS)
+        return {date.fromisoformat(c.date) for c in r.closes if c.status == "closed"}

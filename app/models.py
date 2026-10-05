@@ -122,3 +122,35 @@ class LoadRun(Base):
     finished_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     outcome: Mapped[str] = mapped_column(String(8))
     detail: Mapped[str] = mapped_column(Text)  # JSON summary, or the error
+
+
+class CoverageSeries(Base):
+    """One series' coverage against business days (app/coverage.py), replaced on every refresh."""
+
+    __tablename__ = "coverage_series"
+
+    sec_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    series: Mapped[str] = mapped_column(String(20), primary_key=True)  # golden, UST-PAR, H15-TCM
+    first_date: Mapped[date] = mapped_column(Date)
+    last_date: Mapped[date] = mapped_column(Date)
+    values: Mapped[int] = mapped_column(Integer)
+    missing_days: Mapped[int] = mapped_column(Integer)
+    gaps: Mapped[int] = mapped_column(Integer)
+    closed_day_values: Mapped[int] = mapped_column(Integer)
+    closed_days: Mapped[str] = mapped_column(Text)  # JSON list of dates, first 200
+    basis: Mapped[str] = mapped_column(Text)  # which calendar governed which years
+    refreshed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class CoverageGap(Base):
+    """A run of business days a series has no value for."""
+
+    __tablename__ = "coverage_gap"
+    __table_args__ = (Index("ix_coverage_gap_series", "sec_id", "series"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sec_id: Mapped[int] = mapped_column(Integer)
+    series: Mapped[str] = mapped_column(String(20))
+    start_date: Mapped[date] = mapped_column(Date)
+    end_date: Mapped[date] = mapped_column(Date)
+    days: Mapped[int] = mapped_column(Integer)

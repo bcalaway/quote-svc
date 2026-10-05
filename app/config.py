@@ -49,6 +49,8 @@ class Settings:
     # mkt-data's near-raw observations, secmaster-svc's source-key map.
     mkt_data_grpc: str = os.environ.get("MKT_DATA_GRPC", "mkt-data:9090")
     secmaster_grpc: str = os.environ.get("SECMASTER_GRPC", "secmaster-svc:9090")
+    # calendar-svc's, for the coverage check's business days.
+    calendar_grpc: str = os.environ.get("CALENDAR_GRPC", "calendar-svc:9090")
 
 
 settings = Settings()

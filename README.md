@@ -53,7 +53,18 @@ Requests take `sec_id`s; answers add the cached short names. Values are canonica
 - `quote_svc_source_disagreements{instrument}`, where UST-PAR and H.15 differ.
 - Unmapped keys.
 
-The missing-business-day check against SIFMA-US and the alert rules are step B8.
+## Coverage
+
+After every load, and on `POST /jobs/coverage`, `app/coverage.py` checks each instrument's series against the business days it should have. The series are the golden values, UST-PAR and H15-TCM. Each year's business days come from the first calendar in calendar-svc that covers it: SIFMA-US from 1996, FED from 1986. Years neither covers are checked against weekdays only, and each row's `basis` says which calendar applied.
+
+The results go into `coverage_series` and `coverage_gap`, both replaced every time:
+- first and last date and the number of values;
+- business days missing, grouped into gaps (date ranges);
+- values on closed days.
+
+`GET /jobs/coverage?name=` returns them, and the metrics are `quote_svc_coverage_*`. If calendar-svc is down, the load still succeeds and `quote_svc_coverage_ok` shows 0. `quote_svc_source_disagreement_bp` lists the latest 20 disagreeing dates per instrument, in basis points.
+
+These back the B6 report and B8's missing-day alerts (the alert rules are B8).
 
 ## Local development
 
