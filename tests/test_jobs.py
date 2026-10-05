@@ -84,5 +84,20 @@ def test_coverage_endpoint_and_a_calendar_outage(migrated_db, monkeypatch):
     assert {r["series"] for r in rows["coverage"]} == {"golden", "UST-PAR", "H15-TCM"}
 
 
+def test_metrics_list_closed_day_values(migrated_db):
+    from datetime import UTC, date, datetime
+
+    from app import db
+    from app.models import CoverageSeries
+
+    with db.session() as s:
+        s.add(CoverageSeries(sec_id=1, series="UST-PAR", first_date=date(2026, 10, 1), last_date=date(2026, 10, 13),
+                             values=7, missing_days=0, gaps=0, closed_day_values=1, closed_days='["2026-10-12"]',
+                             basis="SIFMA-US 2026", refreshed_at=datetime.now(UTC)))
+        s.commit()
+    body = client.get("/metrics").text
+    assert 'quote_svc_coverage_closed_day{instrument="1",series="UST-PAR",date="2026-10-12"} 1' in body
+
+
 def test_metrics_without_a_database():
     assert "quote_svc_up 0" in client.get("/metrics").text

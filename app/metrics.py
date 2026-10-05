@@ -8,6 +8,7 @@ load). The missing-business-day check against SIFMA-US and the alert rules
 come with step B8.
 """
 
+import json
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Response
@@ -145,6 +146,9 @@ def render(s) -> str:
                [(lb, c.closed_day_values) for lb, c in lab])
     out.metric("quote_svc_coverage_basis", "gauge", "1, labelled with the calendars that set each series' business days.",
                [(lb | {"basis": c.basis}, 1) for lb, c in lab])
+    out.metric("quote_svc_coverage_closed_day", "gauge",
+               f"1 for each date a series has a value though the market was closed (the first {DETAIL_LIMIT} per series).",
+               [(lb | {"date": d}, 1) for lb, c in lab for d in json.loads(c.closed_days or "[]")[:DETAIL_LIMIT]])
     gaps = list(s.scalars(select(CoverageGap).order_by(CoverageGap.sec_id, CoverageGap.series, CoverageGap.days.desc())))
     shown_gaps: dict[tuple, int] = {}
     gap_samples = []
