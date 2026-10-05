@@ -1,0 +1,87 @@
+// Copy of calendar-svc's proto/calendars.proto: quote-svc is a client of it.
+// Keep it in step with calendar-svc's; only the client stubs are used here.
+
+syntax = "proto3";
+
+package calendar_svc;
+
+// The golden holiday calendars (mkt-data's docs/phase-2.md, Part A): FED,
+// SIFMA-US, NYSE. Internal-only per ADR-0020: reachable as calendar-svc:9090
+// on the home-platform Docker network, never through Traefik. Dates are ISO
+// strings (YYYY-MM-DD), close times HH:MM local to the calendar (empty for
+// none).
+service Calendars {
+  // Every calendar: name, time zone, covered years.
+  rpc ListCalendars(ListCalendarsRequest) returns (ListCalendarsResponse);
+  // Is this date a business day? NOT_FOUND for an unknown calendar,
+  // OUT_OF_RANGE for a year no source covers.
+  rpc BusinessDay(BusinessDayRequest) returns (BusinessDayResponse);
+  // Closed and early-close weekdays in a date range (inclusive).
+  rpc Closes(ClosesRequest) returns (ClosesResponse);
+  // Every covered year, with the source credited for it and that source's
+  // kind (published, rules, projected).
+  rpc Coverage(CoverageRequest) returns (CoverageResponse);
+}
+
+message ListCalendarsRequest {}
+
+message CalendarInfo {
+  string name = 1;          // e.g. SIFMA-US
+  string description = 2;
+  string timezone = 3;      // IANA, e.g. America/New_York
+  int32 first_year = 4;     // 0 if not loaded yet
+  int32 last_year = 5;
+}
+
+message ListCalendarsResponse {
+  repeated CalendarInfo calendars = 1;
+}
+
+message BusinessDayRequest {
+  string calendar = 1;
+  string date = 2;
+}
+
+message BusinessDayResponse {
+  string calendar = 1;
+  string date = 2;
+  bool business_day = 3;
+  string status = 4;        // open | closed | early_close | weekend
+  string holiday = 5;
+  string close_time = 6;
+  bool projected = 7;       // from a year no publisher covers yet: a best guess
+}
+
+message ClosesRequest {
+  string calendar = 1;
+  string start = 2;
+  string end = 3;
+}
+
+message Close {
+  string date = 1;
+  string status = 2;        // closed | early_close
+  string holiday = 3;
+  string close_time = 4;
+  bool projected = 5;
+}
+
+message ClosesResponse {
+  string calendar = 1;
+  repeated Close closes = 2;
+}
+
+message CoverageRequest {
+  string calendar = 1;
+}
+
+message YearCoverage {
+  int32 year = 1;
+  string source = 2;        // the mkt-data source credited, e.g. SIFMA-US-ARCHIVE
+  string kind = 3;          // published | rules | projected
+}
+
+message CoverageResponse {
+  string calendar = 1;
+  repeated YearCoverage years = 2;
+}

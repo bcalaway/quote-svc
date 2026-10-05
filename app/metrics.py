@@ -15,10 +15,28 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import aliased
 
+from app import coverage as coverage_mod
 from app import db
-from app.models import Golden, InstrumentRef, LoadRun, Quote, QuoteHistory, SourcePeriod, UnmappedKey
+from app.models import (
+    CoverageGap,
+    CoverageSeries,
+    Golden,
+    InstrumentRef,
+    LoadRun,
+    Quote,
+    QuoteHistory,
+    SourcePeriod,
+    UnmappedKey,
+)
 
 router = APIRouter()
+
+# Dates and gaps listed per instrument or series in the detail metrics.
+DETAIL_LIMIT = 20
+
+
+def _num(v) -> str:
+    return format(v.normalize(), "f")
 
 
 def _epoch(t: datetime) -> float:
@@ -94,6 +112,56 @@ def render(s) -> str:
     out.metric("quote_svc_source_disagreements", "gauge",
                "Dates where UST-PAR and H15-TCM give different values, by instrument.",
                [({"instrument": name(i)}, n) for i, n in sorted(differ)])
+    detail = s.execute(
+        select(a.sec_id, a.as_of, a.value, b.value)
+        .join(b, (a.sec_id == b.sec_id) & (a.as_of == b.as_of) & (a.field == b.field))
+        .where(a.source == "UST-PAR", b.source == "H15-TCM", a.value != b.value)
+        .order_by(a.sec_id, a.as_of.desc())
+    ).all()
+    shown: dict[int, int] = {}
+    samples = []
+    for sec_id, as_of, ust, h15 in detail:
+        if shown.get(sec_id, 0) >= DETAIL_LIMIT:
+            continue
+        shown[sec_id] = shown.get(sec_id, 0) + 1
+        samples.append(({"instrument": name(sec_id), "date": as_of.isoformat(), "ust_par": _num(ust), "h15_tcm": _num(h15)},
+                        float((ust - h15) * 10000)))
+    out.metric("quote_svc_source_disagreement_bp", "gauge",
+               f"UST-PAR minus H15-TCM in basis points, per disagreeing date (the latest {DETAIL_LIMIT} per instrument).",
+               samples)
+
+    cov = list(s.scalars(select(CoverageSeries)))
+    lab = [({"instrument": name(c.sec_id), "series": c.series}, c) for c in cov]
+    out.metric("quote_svc_coverage_first_date_timestamp_seconds", "gauge", "Each series' first date.",
+               [(lb, _day_epoch(c.first_date)) for lb, c in lab])
+    out.metric("quote_svc_coverage_last_date_timestamp_seconds", "gauge", "Each series' latest date.",
+               [(lb, _day_epoch(c.last_date)) for lb, c in lab])
+    out.metric("quote_svc_coverage_values", "gauge", "Values in each series (golden, UST-PAR, H15-TCM).",
+               [(lb, c.values) for lb, c in lab])
+    out.metric("quote_svc_coverage_missing_days", "gauge",
+               "Business days between a series' first and last date that it has no value for.",
+               [(lb, c.missing_days) for lb, c in lab])
+    out.metric("quote_svc_coverage_closed_day_values", "gauge", "Values on days the market was closed.",
+               [(lb, c.closed_day_values) for lb, c in lab])
+    out.metric("quote_svc_coverage_basis", "gauge", "1, labelled with the calendars that set each series' business days.",
+               [(lb | {"basis": c.basis}, 1) for lb, c in lab])
+    gaps = list(s.scalars(select(CoverageGap).order_by(CoverageGap.sec_id, CoverageGap.series, CoverageGap.days.desc())))
+    shown_gaps: dict[tuple, int] = {}
+    gap_samples = []
+    for g in gaps:
+        k = (g.sec_id, g.series)
+        if shown_gaps.get(k, 0) >= DETAIL_LIMIT:
+            continue
+        shown_gaps[k] = shown_gaps.get(k, 0) + 1
+        gap_samples.append(({"instrument": name(g.sec_id), "series": g.series, "start": g.start_date.isoformat(),
+                             "end": g.end_date.isoformat()}, g.days))
+    out.metric("quote_svc_coverage_gap_days", "gauge",
+               f"Business days in each gap (the longest {DETAIL_LIMIT} per series).", gap_samples)
+    refreshed = max((c.refreshed_at for c in cov), default=None)
+    out.metric("quote_svc_coverage_refreshed_timestamp_seconds", "gauge", "When coverage was last recomputed.",
+               [({}, _epoch(refreshed))] if refreshed else [])
+    out.metric("quote_svc_coverage_ok", "gauge", "0 if the last coverage refresh failed (calendar-svc unreachable).",
+               [({}, 0 if coverage_mod.last_failure() else 1)])
 
     unmapped = list(s.scalars(select(UnmappedKey).order_by(UnmappedKey.source, UnmappedKey.source_key)))
     per_source: dict[str, int] = {}

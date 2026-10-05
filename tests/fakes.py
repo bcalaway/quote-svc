@@ -1,4 +1,6 @@
-"""A stand-in for mkt-data and secmaster-svc (app/upstream.py's Upstream)."""
+"""Stand-ins for mkt-data, secmaster-svc and calendar-svc (app/upstream.py)."""
+
+from datetime import date
 
 from app.upstream import Period, Value
 
@@ -40,6 +42,26 @@ class FakeUpstream:
 
     def instruments(self):
         return dict(NAMES)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class FakeCalendars:
+    """calendar-svc's answers: SIFMA-US covers 2026 (closed 2026-10-12), FED covers 2025."""
+
+    def __init__(self):
+        self.covered = {"SIFMA-US": {2026}, "FED": {2025, 2026}}
+        self.closed = {"SIFMA-US": {date(2026, 10, 12)}, "FED": {date(2025, 12, 25)}}
+
+    def covered_years(self, calendar):
+        return self.covered.get(calendar, set())
+
+    def closed_days(self, calendar, start, end):
+        return {d for d in self.closed.get(calendar, set()) if start <= d <= end}
 
     def __enter__(self):
         return self
