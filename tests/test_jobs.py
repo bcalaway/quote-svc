@@ -65,6 +65,8 @@ def test_metrics(migrated_db, monkeypatch):
     assert 'quote_svc_coverage_values{instrument="UST-10Y-CMT",series="golden"} 2' in body
     assert 'quote_svc_coverage_basis{instrument="UST-10Y-CMT",series="UST-PAR",basis="SIFMA-US 2026"} 1' in body
     assert "quote_svc_coverage_ok 1" in body
+    assert "quote_svc_curve_calendar_ok 1" in body and "quote_svc_curve_due_date_timestamp_seconds " in body
+    assert "quote_svc_curve_active_instruments " in body  # the values depend on today's date: test_freshness.py
 
 
 def test_coverage_endpoint_and_a_calendar_outage(migrated_db, monkeypatch):

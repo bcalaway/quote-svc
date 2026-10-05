@@ -4,8 +4,9 @@ Text format, computed from the database on each scrape. Prometheus scrapes it
 on the home-platform network as quote-svc:8000 (nyc_pa_aws_gitops's
 prometheus.yml); no auth, like the other scrape targets, and nothing in it is
 sensitive. Instruments are labelled by short name (from secmaster-svc's last
-load). The missing-business-day check against SIFMA-US and the alert rules
-come with step B8.
+load). Whether the latest Treasury curve is in on time, and whether a series
+is stuck repeating itself, come from app/freshness.py (step B8); the alert
+rules are in nyc_pa_aws_gitops.
 """
 
 import json
@@ -17,7 +18,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import aliased
 
 from app import coverage as coverage_mod
-from app import db
+from app import db, freshness
+from app.config import settings
 from app.models import (
     CoverageGap,
     CoverageSeries,
@@ -29,6 +31,7 @@ from app.models import (
     SourcePeriod,
     UnmappedKey,
 )
+from app.upstream import GrpcCalendars
 
 router = APIRouter()
 
@@ -68,7 +71,32 @@ def _day_epoch(d) -> float:
     return datetime(d.year, d.month, d.day, tzinfo=UTC).timestamp()
 
 
-def render(s) -> str:
+def _calendars() -> GrpcCalendars:
+    # Short: this runs inside a Prometheus scrape (10 s timeout), and a failure is cached for an hour.
+    return GrpcCalendars(settings.calendar_grpc, timeout=3)
+
+
+def _freshness(s, out: _Out, name, calendars) -> None:
+    f = freshness.check(s, calendars)
+    out.metric("quote_svc_curve_due_date_timestamp_seconds", "gauge",
+               "The latest SIFMA-US business day whose Treasury curve is due (by 9:00 a.m. New York the next day).",
+               [({}, _day_epoch(f["due"]))])
+    out.metric("quote_svc_curve_calendar_ok", "gauge",
+               "0 if calendar-svc couldn't say which days were closed (weekdays stand in).", [({}, int(f["calendar_ok"]))])
+    out.metric("quote_svc_curve_active_instruments", "gauge",
+               f"Instruments with a UST-PAR value in the {freshness.ACTIVE_DAYS} days before the due date.",
+               [({}, len(f["last"]))])
+    out.metric("quote_svc_curve_last_date_timestamp_seconds", "gauge", "Each active instrument's latest UST-PAR date.",
+               [({"instrument": name(i)}, _day_epoch(d)) for i, d in sorted(f["last"].items())])
+    out.metric("quote_svc_curve_missing", "gauge", "1 if an active instrument has no UST-PAR value for the due date.",
+               [({"instrument": name(i)}, int(m)) for i, m in sorted(f["missing"].items())])
+    out.metric("quote_svc_golden_repeat_days", "gauge",
+               f"How many of an active instrument's latest golden yields in a row are identical (of the last "
+               f"{freshness.REPEAT_LOOKBACK}).",
+               [({"instrument": name(i)}, n) for i, n in sorted(f["repeats"].items())])
+
+
+def render(s, calendars=None) -> str:
     out = _Out()
     names = dict(s.execute(select(InstrumentRef.sec_id, InstrumentRef.short_name)).all())
 
@@ -176,6 +204,7 @@ def render(s) -> str:
                [({"source": k}, n) for k, n in sorted(per_source.items())])
     out.metric("quote_svc_unmapped_key", "gauge", "1 for each unmapped source key, with its values in the last months read.",
                [({"source": u.source, "key": u.source_key}, u.values) for u in unmapped])
+    _freshness(s, out, name, calendars or _calendars)
     return out.text()
 
 
