@@ -18,6 +18,12 @@ For each source, in priority order:
 With each month, golden values are recomputed for every (sec_id, date,
 field) it touched: the highest-priority source with a value wins (UST-PAR,
 then H15-TCM; H.15 fills the years before 1990 and is a cross-check after).
+A source can be kept out of golden for an instrument over a window
+(`GOLDEN_EXCLUDE`): its quotes are still loaded and served as that source's,
+but golden leaves the dates empty if no other source has them. Every load
+recomputes those windows, so a change to the list takes effect at the next
+load without a rebuild.
+
 Each month commits on its own (quotes, golden values, watermark), so a
 full-history load stays small in memory and a failure keeps what's done.
 
@@ -39,6 +45,13 @@ from app.upstream import Upstream
 # Source priority per field, highest first.
 PRIORITY = {"yield": ["UST-PAR", "H15-TCM"]}
 SOURCES = ["UST-PAR", "H15-TCM"]
+# Source values golden doesn't use, by instrument short name: (source, first, last, why).
+GOLDEN_EXCLUDE: dict[str, list[tuple[str, date, date, str]]] = {
+    # Bill, 2026-10-05: leave Treasury's 30-year gap in golden. H.15 has values on
+    # these dates, but Treasury published no 30-year CMT then (secmaster-svc's
+    # note gap-2002-2006), so they aren't published market values.
+    "UST-30Y-CMT": [("H15-TCM", date(2002, 2, 19), date(2006, 2, 8), "Treasury's 30-year gap, 2002-2006")],
+}
 # Dates per query when recomputing golden values (a backfill touches decades).
 GOLDEN_BATCH = 500
 # Near-raw units, and how to turn one into a decimal.
@@ -116,8 +129,20 @@ def _load_period(s: Session, up: Upstream, source: str, period: str, mapping: di
     return out | {"values": len(values)}, touched
 
 
-def _refresh_golden(s: Session, keys: set, now: datetime) -> dict:
+def _exclusions(s: Session) -> dict[int, list[tuple[str, date, date]]]:
+    """GOLDEN_EXCLUDE by sec_id (through instrument_ref's short names)."""
+    ids = {r.short_name: r.sec_id for r in s.scalars(select(InstrumentRef))}
+    return {ids[name]: [(src, lo, hi) for src, lo, hi, _ in windows]
+            for name, windows in GOLDEN_EXCLUDE.items() if name in ids}
+
+
+def _usable(source: str, key: tuple, exclude: dict) -> bool:
+    return not any(src == source and lo <= key[1] <= hi for src, lo, hi in exclude.get(key[0], ()))
+
+
+def _refresh_golden(s: Session, keys: set, now: datetime, exclude: dict | None = None) -> dict:
     """Recompute the golden value of every touched key, a batch of dates at a time."""
+    exclude = exclude or {}
     out = {"golden_set": 0, "golden_removed": 0}
     dates = sorted({k[1] for k in keys})
     for i in range(0, len(dates), GOLDEN_BATCH):
@@ -129,7 +154,8 @@ def _refresh_golden(s: Session, keys: set, now: datetime) -> dict:
         golden = {(g.sec_id, g.as_of, g.field): g for g in s.scalars(select(Golden).where(Golden.as_of.in_(chunk)))}
         for key in sorted(k for k in keys if k[1] in in_chunk):
             by_source = quotes.get(key, {})
-            best = next((by_source[src] for src in PRIORITY.get(key[2], SOURCES) if src in by_source), None)
+            best = next((by_source[src] for src in PRIORITY.get(key[2], SOURCES)
+                         if src in by_source and _usable(src, key, exclude)), None)
             g = golden.get(key)
             if best is None:
                 if g is not None:
@@ -167,6 +193,7 @@ def _load(s: Session, up: Upstream, now: datetime, progress: dict) -> dict:
     """
     progress["instruments"] = _refresh_names(s, up, now)
     s.commit()
+    exclude = _exclusions(s)
     golden = {"golden_set": 0, "golden_removed": 0}
     progress |= golden
     for source in SOURCES:
@@ -182,7 +209,7 @@ def _load(s: Session, up: Upstream, now: datetime, progress: dict) -> dict:
         for p in todo:
             out, keys = _load_period(s, up, source, p.period, mapping, unmapped, now)
             s.flush()
-            for k, v in _refresh_golden(s, keys, now).items():
+            for k, v in _refresh_golden(s, keys, now, exclude).items():
                 progress[k] += v
             mark = s.get(SourcePeriod, (source, p.period))
             if mark is None:
@@ -207,6 +234,12 @@ def _load(s: Session, up: Upstream, now: datetime, progress: dict) -> dict:
             s.execute(delete(UnmappedKey).where(UnmappedKey.source == source, UnmappedKey.source_key.in_(mapped_now)))
         s.commit()
         entry["unmapped"] = sorted(unmapped)
+    # Re-apply the exclusion windows, so a change to GOLDEN_EXCLUDE reaches golden values already set.
+    windows = {(q.sec_id, q.as_of, q.field) for sec_id, ws in exclude.items() for _, lo, hi in ws
+               for q in s.scalars(select(Quote).where(Quote.sec_id == sec_id, Quote.as_of >= lo, Quote.as_of <= hi))}
+    for k, v in _refresh_golden(s, windows, now, exclude).items():
+        progress[k] += v
+    s.commit()
     return progress
 
 
