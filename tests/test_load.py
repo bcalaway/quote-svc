@@ -145,3 +145,22 @@ def test_a_failure_is_recorded_and_changes_nothing(migrated_db):
         run_load(s, up)
     assert _count(Quote) == 0 and _count(SourcePeriod) == 0
     assert _count(LoadRun, LoadRun.outcome == "error") == 1
+
+
+def test_an_excluded_window_leaves_golden_empty_but_keeps_the_quote(migrated_db, monkeypatch):
+    from app import load
+
+    up = _up()
+    up.put("UST-PAR", "2026-10", 38, [("BC_10YEAR", D1, "4.10")])
+    _load(up)
+    assert _golden(TEN, D2) == (Decimal("0.0413"), "H15-TCM")
+    # Added after golden was set: the next load takes it back out, with nothing new upstream.
+    monkeypatch.setitem(load.GOLDEN_EXCLUDE, "UST-10Y-CMT", [("H15-TCM", date(2026, 10, 2), date(2026, 10, 2), "test")])
+    out = _load(up)
+    assert out["golden_removed"] == 1 and _golden(TEN, D2) is None
+    assert _golden(TEN, D1) == (Decimal("0.041"), "UST-PAR")
+    assert _count(Quote, Quote.source == "H15-TCM") == 2  # still loaded and served as H.15's
+    # UST-PAR isn't excluded, so a value from it fills the date again.
+    up.put("UST-PAR", "2026-10", 39, [("BC_10YEAR", D1, "4.10"), ("BC_10YEAR", D2, "4.12")])
+    _load(up)
+    assert _golden(TEN, D2) == (Decimal("0.0412"), "UST-PAR")
