@@ -19,10 +19,13 @@ FROM base AS dev
 COPY requirements-dev.txt .
 RUN pip install --no-cache-dir -r requirements-dev.txt
 COPY tests/ tests/
+# DAG files aren't in the runtime image (the deploy delivers them to Airflow),
+# but tests/test_dags.py checks them and ruff lints them.
+COPY dags/ dags/
 COPY ruff.toml .
 
 FROM dev AS lint
-RUN ruff check app/ tests/ migrations/
+RUN ruff check app/ tests/ migrations/ dags/
 
 FROM dev AS test
 RUN pytest

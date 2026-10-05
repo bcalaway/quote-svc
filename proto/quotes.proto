@@ -1,0 +1,107 @@
+// quote-svc's service API (mkt-data's docs/phase-2.md, Part B step 5).
+// Internal only: quote-svc:9090 on the home-platform network (ADR-0020).
+// mkt-api reads yields and curves here. Values are decimal strings, rates as
+// decimals, in one canonical form with no trailing zeros or exponent
+// ("0.041" = 4.10%); never floats.
+
+syntax = "proto3";
+
+package quote_svc;
+
+service Quotes {
+  // Values over a date range for one or more instruments: golden by default,
+  // or one source's.
+  rpc GetSeries(GetSeriesRequest) returns (GetSeriesResponse);
+  // Golden values for a set of instruments on one date (default: the latest
+  // date any of them has). Instruments with no value that day are listed.
+  rpc GetCurve(GetCurveRequest) returns (GetCurveResponse);
+  // Every source's value per instrument and date, and whether they differ.
+  rpc CompareSources(CompareSourcesRequest) returns (CompareSourcesResponse);
+  // Each instrument's most recent golden value.
+  rpc GetLatest(GetLatestRequest) returns (GetLatestResponse);
+}
+
+message GetSeriesRequest {
+  repeated int32 sec_ids = 1;
+  string start = 2;   // YYYY-MM-DD
+  string end = 3;     // YYYY-MM-DD
+  string field = 4;   // default "yield"
+  string source = 5;  // empty: golden; or UST-PAR, H15-TCM
+}
+
+message GetSeriesResponse {
+  repeated Series series = 1;
+}
+
+message Series {
+  int32 sec_id = 1;
+  string short_name = 2;
+  repeated Point points = 3;
+}
+
+message Point {
+  string as_of = 1;
+  string value = 2;
+  string source = 3;  // which source the value came from
+}
+
+message GetCurveRequest {
+  repeated int32 sec_ids = 1;
+  string as_of = 2;  // YYYY-MM-DD; empty for the latest
+  string field = 3;
+}
+
+message GetCurveResponse {
+  string as_of = 1;
+  repeated CurvePoint points = 2;
+  repeated string missing = 3;  // short names with no value that day
+}
+
+message CurvePoint {
+  int32 sec_id = 1;
+  string short_name = 2;
+  string value = 3;
+  string source = 4;
+}
+
+message CompareSourcesRequest {
+  repeated int32 sec_ids = 1;
+  string start = 2;
+  string end = 3;
+  string field = 4;
+  bool only_differences = 5;
+}
+
+message CompareSourcesResponse {
+  repeated Comparison rows = 1;
+}
+
+message Comparison {
+  int32 sec_id = 1;
+  string short_name = 2;
+  string as_of = 3;
+  bool differs = 4;
+  repeated SourceValue values = 5;
+}
+
+message SourceValue {
+  string source = 1;
+  string value = 2;
+}
+
+message GetLatestRequest {
+  repeated int32 sec_ids = 1;
+  string field = 2;
+}
+
+message GetLatestResponse {
+  repeated Latest latest = 1;
+}
+
+message Latest {
+  int32 sec_id = 1;
+  string short_name = 2;
+  string as_of = 3;
+  string value = 4;
+  string source = 5;
+}

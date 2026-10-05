@@ -1,0 +1,95 @@
+// Copy of secmaster-svc's proto/securities.proto: quote-svc is a client of it.
+// Keep it in step with secmaster-svc's; only the client stubs are used here.
+
+// secmaster-svc's service API (mkt-data's docs/phase-2.md, Part B step 4).
+// Internal only: secmaster-svc:9090 on the home-platform network (ADR-0020).
+// quote-svc resolves source keys to instruments with Resolve; mkt-api looks
+// instruments up and adds their short names to every answer.
+
+syntax = "proto3";
+
+package secmaster_svc;
+
+service Securities {
+  // One instrument by sec_id, or by short name or alias (case-insensitive),
+  // with its identifiers and notes. NOT_FOUND if there's none.
+  rpc GetInstrument(GetInstrumentRequest) returns (Instrument);
+  // Instruments, by type, curve and tenor (identifiers and notes left out).
+  rpc ListInstruments(ListInstrumentsRequest) returns (ListInstrumentsResponse);
+  // Map a source's keys to instruments in one call (the batch lookup
+  // quote-svc uses). Unknown keys come back in `unknown`, not as an error.
+  rpc Resolve(ResolveRequest) returns (ResolveResponse);
+  // Instruments whose name, alias, identifier or description contains the query.
+  rpc Search(SearchRequest) returns (ListInstrumentsResponse);
+}
+
+message GetInstrumentRequest {
+  oneof key {
+    int32 sec_id = 1;
+    string name = 2;  // short name or alias: UST-10Y-CMT, UST-6W-CMT
+  }
+}
+
+message ListInstrumentsRequest {
+  string type = 1;   // cmt_yield; empty for all
+  string curve = 2;  // UST; empty for all
+  bool include_inactive = 3;
+}
+
+message ListInstrumentsResponse {
+  repeated Instrument instruments = 1;
+}
+
+message ResolveRequest {
+  string scheme = 1;           // an mkt-data source name for CMTs: UST-PAR, H15-TCM; or FRED
+  repeated string values = 2;  // that source's keys: BC_10YEAR, RIFLGFCY10_N.B
+  string as_of = 3;            // YYYY-MM-DD: only identifiers valid then; empty for any current one
+}
+
+message ResolveResponse {
+  string scheme = 1;
+  repeated Match matches = 2;
+  repeated string unknown = 3;
+}
+
+message Match {
+  string value = 1;
+  int32 sec_id = 2;
+  string short_name = 3;
+  string valid_from = 4;  // YYYY-MM-DD, empty when open
+  string valid_to = 5;
+}
+
+message SearchRequest {
+  string query = 1;
+  int32 limit = 2;  // 0 means 20
+}
+
+message Instrument {
+  int32 sec_id = 1;
+  string short_name = 2;
+  repeated string aliases = 3;
+  string type = 4;
+  string currency = 5;
+  string country = 6;
+  string curve = 7;
+  string tenor = 8;     // ISO 8601 duration: P10Y, P6W
+  string calendar = 9;  // a calendar-svc name: SIFMA-US
+  string status = 10;
+  string description = 11;
+  repeated InstrumentIdentifier identifiers = 12;
+  repeated InstrumentNote notes = 13;
+}
+
+message InstrumentIdentifier {
+  string scheme = 1;
+  string value = 2;
+  string valid_from = 3;
+  string valid_to = 4;
+}
+
+message InstrumentNote {
+  string key = 1;
+  string date = 2;  // YYYY-MM-DD
+  string text = 3;
+}

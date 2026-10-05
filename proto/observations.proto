@@ -1,0 +1,81 @@
+// Copy of mkt-data's proto/observations.proto: quote-svc is a client of it.
+// Keep it in step with mkt-data's; only the client stubs are used here.
+
+syntax = "proto3";
+
+package mkt_data;
+
+// Near-raw time-series observations (docs/phase-2.md, Part B): each source's
+// values as that source publishes them, keyed by the source's own series key
+// (BC_10YEAR, RIFLGFCY10_N.B), value as printed with its unit. quote-svc reads
+// these and builds golden quotes.
+//
+// Read by period (a month): a source's periods with the newest capture each
+// one's values came from, so a client re-reads only the months that changed,
+// and one period's values. Internal-only per ADR-0020: mkt-data:9090 on the
+// home-platform network. Dates are YYYY-MM-DD; values are decimal strings
+// exactly as stored ("4.10"); timestamps ISO 8601 (empty for none).
+service Observations {
+  // Every time-series source mkt-data captures.
+  rpc ListSources(ListObservationSourcesRequest) returns (ListObservationSourcesResponse);
+  // A source's periods that have values.
+  rpc ListPeriods(ListPeriodsRequest) returns (ListPeriodsResponse);
+  // One period's values: current, and optionally superseded (revisions).
+  rpc GetPeriod(GetPeriodRequest) returns (PeriodValues);
+}
+
+message ListObservationSourcesRequest {}
+
+message ObservationSource {
+  string name = 1;          // UST-PAR, H15-TCM
+  string description = 2;
+  string calendar = 3;      // publication calendar (calendar-svc), e.g. SIFMA-US
+  string first_period = 4;  // earliest month the source serves, YYYY-MM
+  int32 periods = 5;        // months with values so far
+}
+
+message ListObservationSourcesResponse {
+  repeated ObservationSource sources = 1;
+}
+
+message ListPeriodsRequest {
+  string source = 1;
+  string since_period = 2;  // optional: only periods >= this one (YYYY-MM)
+}
+
+message PeriodInfo {
+  string period = 1;               // YYYY-MM
+  int64 latest_capture_id = 2;     // newest capture any of the period's rows came from (changes when values change)
+  int32 values = 3;                // current values
+  string first_date = 4;
+  string last_date = 5;
+}
+
+message ListPeriodsResponse {
+  string source = 1;
+  repeated PeriodInfo periods = 2;
+}
+
+message GetPeriodRequest {
+  string source = 1;
+  string period = 2;
+  bool include_superseded = 3;
+}
+
+message ObservationValue {
+  int64 id = 1;
+  string source_key = 2;
+  string as_of = 3;
+  string field = 4;
+  string value = 5;
+  string unit = 6;
+  int64 capture_id = 7;
+  string valid_from = 8;
+  string valid_to = 9;      // empty: current
+}
+
+message PeriodValues {
+  string source = 1;
+  string period = 2;
+  repeated ObservationValue values = 3;
+}
