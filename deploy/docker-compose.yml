@@ -1,0 +1,33 @@
+# Deploy-time Compose fragment (docs/app-platform.md in nyc_pa_aws_gitops).
+# app-deploy.yml stages this file to the hub as-is and runs it there with
+# `docker compose pull && docker compose up -d` -- the image tag, .env
+# file, and `home-platform` network are all provided at deploy time, not
+# by this file.
+
+services:
+  app:
+    image: 147856894209.dkr.ecr.us-east-1.amazonaws.com/quote-svc:latest
+    container_name: quote-svc
+    restart: unless-stopped
+    # Required on the hub (ADR-0026): the deploy rejects a service without
+    # one. Start here, then set it to the peak on Grafana's Containers
+    # dashboard plus ~30% once the app has run for a week.
+    mem_limit: 256m
+    environment:
+      # Not a secret -- set directly here rather than round-tripping
+      # through SSM/.env like the real credentials below.
+      APP_NAME: quote-svc
+    env_file:
+      - .env
+    # Internal only: no Traefik route and no DNS record. quote-svc has no UI
+    # and no Authentik client (apps/registry.yml), so HTTP on 8000 and gRPC on
+    # 9090 (ranges, curves and source comparisons for mkt-api) are reachable only on the home-platform network, as
+    # quote-svc:8000 and quote-svc:9090.
+    networks:
+      - home-platform
+
+networks:
+  # Created once, platform-side, alongside the first app's deploy -- see
+  # the Networking section of docs/app-platform.md in nyc_pa_aws_gitops.
+  home-platform:
+    external: true
