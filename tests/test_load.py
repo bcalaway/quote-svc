@@ -51,6 +51,19 @@ def test_first_load(migrated_db):
     assert out["golden_set"] == 3
 
 
+def test_a_failed_month_keeps_the_months_before_it(migrated_db):
+    up = _up()
+    up.put("UST-PAR", "2026-11", 40, [("BC_10YEAR", "2026-11-02", "x")])
+    with pytest.raises(LoadError), db.session() as s:
+        run_load(s, up)
+    with db.session() as s:
+        marks = set(s.scalars(select(SourcePeriod.period)))
+    assert marks == {"2026-10"} and _golden(TEN, D1) == (Decimal("0.041"), "UST-PAR")
+    up.put("UST-PAR", "2026-11", 41, [("BC_10YEAR", "2026-11-02", "4.20")])
+    out = _load(up)
+    assert out["sources"][0]["reloaded"] == 1 and _golden(TEN, "2026-11-02") == (Decimal("0.042"), "UST-PAR")
+
+
 def test_nothing_new_reads_nothing(migrated_db):
     up = _up()
     _load(up)

@@ -15,9 +15,11 @@ For each source, in priority order:
    `quote_history` as revised; a value the source no longer has moves there
    as removed.
 
-Then golden values are recomputed for every (sec_id, date, field) touched:
-the highest-priority source with a value wins (UST-PAR, then H15-TCM; H.15
-fills the years before 1990 and is a cross-check after).
+With each month, golden values are recomputed for every (sec_id, date,
+field) it touched: the highest-priority source with a value wins (UST-PAR,
+then H15-TCM; H.15 fills the years before 1990 and is a cross-check after).
+Each month commits on its own (quotes, golden values, watermark), so a
+full-history load stays small in memory and a failure keeps what's done.
 
 Idempotent: a second run with nothing new reads only the month lists. A
 rebuild clears the watermarks, so every month is re-read and corrected.
@@ -155,28 +157,44 @@ def _refresh_names(s: Session, up: Upstream, now: datetime) -> int:
     return len(names)
 
 
-def _load(s: Session, up: Upstream, now: datetime) -> dict:
-    summary = {"instruments": _refresh_names(s, up, now), "sources": []}
-    touched: set = set()
+def _load(s: Session, up: Upstream, now: datetime, progress: dict) -> dict:
+    """Each month is its own transaction: its quotes, the golden values it touched and its watermark.
+
+    A full-history load (the backfill) is hundreds of thousands of quotes, so
+    the session is cleared after every month to keep memory flat. A failure
+    keeps the months already committed; the rest have no new watermark, so
+    the next load picks them up.
+    """
+    progress["instruments"] = _refresh_names(s, up, now)
+    s.commit()
+    golden = {"golden_set": 0, "golden_removed": 0}
+    progress |= golden
     for source in SOURCES:
-        marks = {p.period: p for p in s.scalars(select(SourcePeriod).where(SourcePeriod.source == source))}
+        marks = dict(s.execute(select(SourcePeriod.period, SourcePeriod.capture_id)
+                               .where(SourcePeriod.source == source)).all())
         periods = up.list_periods(source)
-        todo = [p for p in periods if marks.get(p.period) is None or marks[p.period].capture_id != p.latest_capture_id]
+        todo = [p for p in periods if marks.get(p.period) != p.latest_capture_id]
         mapping: dict[str, int | None] = {}
         unmapped: dict[str, int] = {}
         totals = {"added": 0, "revised": 0, "removed": 0, "values": 0}
+        entry = {"source": source, "periods": len(periods), "reloaded": 0, "unmapped": [], **totals}
+        progress["sources"].append(entry)
         for p in todo:
             out, keys = _load_period(s, up, source, p.period, mapping, unmapped, now)
-            for k in totals:
-                totals[k] += out[k]
-            touched |= keys
-            mark = marks.get(p.period)
+            s.flush()
+            for k, v in _refresh_golden(s, keys, now).items():
+                progress[k] += v
+            mark = s.get(SourcePeriod, (source, p.period))
             if mark is None:
                 s.add(SourcePeriod(source=source, period=p.period, capture_id=p.latest_capture_id,
                                    values=out["values"], loaded_at=now))
             else:
                 mark.capture_id, mark.values, mark.loaded_at = p.latest_capture_id, out["values"], now
-            s.flush()
+            s.commit()
+            s.expunge_all()
+            for k in totals:
+                entry[k] += out[k]
+            entry["reloaded"] += 1
         for key, n in unmapped.items():
             row = s.get(UnmappedKey, (source, key))
             if row is None:
@@ -187,24 +205,22 @@ def _load(s: Session, up: Upstream, now: datetime) -> dict:
         mapped_now = [k for k, v in mapping.items() if v is not None]
         if mapped_now:
             s.execute(delete(UnmappedKey).where(UnmappedKey.source == source, UnmappedKey.source_key.in_(mapped_now)))
-        summary["sources"].append({
-            "source": source, "periods": len(periods), "reloaded": len(todo),
-            "unmapped": sorted(unmapped), **totals,
-        })
-    s.flush()
-    summary |= _refresh_golden(s, touched, now)
-    return summary
+        s.commit()
+        entry["unmapped"] = sorted(unmapped)
+    return progress
 
 
 def run_load(s: Session, up: Upstream) -> dict:
-    """Load whatever changed upstream. Commits; raises LoadError (recorded) on failure."""
+    """Load whatever changed upstream, a month per transaction. Raises LoadError (recorded) on failure."""
     started = datetime.now(UTC)
+    progress: dict = {"sources": []}
     try:
-        out = _load(s, up, started)
+        out = _load(s, up, started, progress)
     except Exception as e:  # recorded, then reported to Airflow as a failure
         s.rollback()
-        detail = f"{type(e).__name__}: {e}"[:2000]
-        s.add(LoadRun(started_at=started, finished_at=datetime.now(UTC), outcome="error", detail=detail))
+        detail = f"{type(e).__name__}: {e}"[:1500]
+        s.add(LoadRun(started_at=started, finished_at=datetime.now(UTC), outcome="error",
+                      detail=json.dumps({"error": detail, "before_it": progress})[:4000]))
         s.commit()
         raise LoadError(detail) from e
     s.add(LoadRun(started_at=started, finished_at=datetime.now(UTC), outcome="ok", detail=json.dumps(out)))
