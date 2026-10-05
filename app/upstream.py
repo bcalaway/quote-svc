@@ -85,8 +85,9 @@ class GrpcUpstream:
 class GrpcCalendars:
     """calendar-svc (Calendars) over gRPC, for coverage. Use as a context manager."""
 
-    def __init__(self, target: str):
+    def __init__(self, target: str, timeout: float = TIMEOUT_SECONDS):
         self.target = target
+        self.timeout = timeout
 
     def __enter__(self):
         import grpc
@@ -103,7 +104,7 @@ class GrpcCalendars:
     def covered_years(self, calendar: str) -> set[int]:
         from app.grpc_gen import calendars_pb2 as pb
 
-        r = self._stub.Coverage(pb.CoverageRequest(calendar=calendar), timeout=TIMEOUT_SECONDS)
+        r = self._stub.Coverage(pb.CoverageRequest(calendar=calendar), timeout=self.timeout)
         return {y.year for y in r.years if y.kind != "projected"}
 
     def closed_days(self, calendar: str, start, end) -> set:
@@ -112,5 +113,5 @@ class GrpcCalendars:
         from app.grpc_gen import calendars_pb2 as pb
 
         r = self._stub.Closes(pb.ClosesRequest(calendar=calendar, start=start.isoformat(), end=end.isoformat()),
-                              timeout=TIMEOUT_SECONDS)
+                              timeout=self.timeout)
         return {date.fromisoformat(c.date) for c in r.closes if c.status == "closed"}

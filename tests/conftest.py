@@ -21,3 +21,15 @@ def migrated_db(tmp_path, monkeypatch):
     command.upgrade(cfg, "head")
     yield url
     db._engine.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def fake_calendar_for_metrics(monkeypatch):
+    """/metrics asks calendar-svc which days were closed: the fake answers, and nothing is cached across tests."""
+    from app import freshness, metrics
+    from tests.fakes import FakeCalendars
+
+    freshness._cache.clear()
+    monkeypatch.setattr(metrics, "_calendars", FakeCalendars)
+    yield
+    freshness._cache.clear()
