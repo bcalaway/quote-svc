@@ -60,3 +60,45 @@ def test_latest(loaded):
     assert out[0] | {} == {"sec_id": TEN, "short_name": "UST-10Y-CMT", "as_of": "2026-10-02", "value": "0.0412",
                            "source": "UST-PAR"}
     assert out[1]["as_of"] == ""
+
+
+@pytest.fixture
+def two_months(migrated_db):
+    from tests.fakes import FakeUpstream
+
+    up = FakeUpstream()
+    up.put("UST-PAR", "2026-09", 40, [("BC_10YEAR", "2026-09-28", "4.20"), ("BC_10YEAR", "2026-09-29", "4.30"),
+                                      ("BC_10YEAR", "2026-09-30", "4.10")])
+    up.put("UST-PAR", "2026-10", 41, [("BC_10YEAR", "2026-10-01", "4.15"), ("BC_10YEAR", "2026-10-02", "4.05"),
+                                      ("BC_10YEAR", "2026-10-05", "4.25")])
+    up.put("H15-TCM", "2026-10", 42, [("RIFLGFCY10_N.B", "2026-10-01", "4.16")])
+    with db.session() as s:
+        run_load(s, up)
+
+
+def _bars(interval, source=""):
+    with db.session() as s:
+        [x] = quotes.bars(s, [TEN], date(2026, 9, 1), date(2026, 10, 31), interval, source=source)
+    return [(b["start"], b["open"], b["high"], b["low"], b["close"], b["last"], b["source"]) for b in x["bars"]]
+
+
+def test_bars_by_month_week_quarter_year_and_day(two_months):
+    assert _bars("month") == [
+        ("2026-09-01", "0.042", "0.043", "0.041", "0.041", "2026-09-30", "UST-PAR"),
+        ("2026-10-01", "0.0415", "0.0425", "0.0405", "0.0425", "2026-10-05", "UST-PAR"),
+    ]
+    # Weeks start on Monday and cross month ends.
+    assert _bars("week") == [
+        ("2026-09-28", "0.042", "0.043", "0.0405", "0.0405", "2026-10-02", "UST-PAR"),
+        ("2026-10-05", "0.0425", "0.0425", "0.0425", "0.0425", "2026-10-05", "UST-PAR"),
+    ]
+    assert [b[0] for b in _bars("quarter")] == ["2026-07-01", "2026-10-01"]
+    assert _bars("year") == [("2026-01-01", "0.042", "0.043", "0.0405", "0.0425", "2026-10-05", "UST-PAR")]
+    assert len(_bars("day")) == 6 and _bars("day")[0][1:5] == ("0.042",) * 4
+
+
+def test_bars_of_one_source_and_bad_intervals(two_months):
+    assert _bars("month", source="H15-TCM") == [
+        ("2026-10-01", "0.0416", "0.0416", "0.0416", "0.0416", "2026-10-01", "H15-TCM")]
+    with pytest.raises(ValueError, match="hour"):
+        _bars("hour")

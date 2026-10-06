@@ -38,13 +38,14 @@ It's idempotent, and a failure rolls back and is recorded. `POST /jobs/rebuild?s
 
 **gRPC** (`proto/quotes.proto`, `quote-svc:9090`), service `quote_svc.Quotes`:
 - `GetSeries`: golden values by default, or one source's.
+- `GetBars`: the same per day, week (from Monday), month, quarter or year: open, high, low, close, the close's date and source. Computed in the database (window functions return each period's first and last rows with its high and low), so a monthly view of 64 years reads about 780 rows per instrument.
 - `GetCurve`: one date, defaulting to the latest; lists which instruments are missing.
 - `CompareSources`: every source's value per date, flagging where they differ.
 - `GetLatest`.
 
 Requests take `sec_id`s; answers add the cached short names. Values are canonical decimal strings ("0.041" = 4.10%). quote-svc is a client of `proto/observations.proto` and `proto/securities.proto`, copies of mkt-data's and secmaster-svc's; keep them in step.
 
-**Job API** (bearer `AIRFLOW_TOKEN`; the GETs also take `READ_TOKEN`): `POST /jobs/load`, `POST /jobs/rebuild`, and `GET /jobs/series`, `/jobs/curve`, `/jobs/compare`, `/jobs/latest` by short name (`?name=UST-10Y-CMT`).
+**Job API** (bearer `AIRFLOW_TOKEN`; the GETs also take `READ_TOKEN`): `POST /jobs/load`, `POST /jobs/rebuild`, and `GET /jobs/series`, `/jobs/bars`, `/jobs/curve`, `/jobs/compare`, `/jobs/latest` by short name (`?name=UST-10Y-CMT`).
 
 **Metrics** (`GET /metrics`, scraped as `quote-svc:8000`):
 - Load: `quote_svc_load_ok` and `quote_svc_load_last_success_timestamp_seconds`.

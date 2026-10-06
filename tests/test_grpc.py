@@ -44,14 +44,24 @@ def test_quotes(migrated_db):
         cmp = await stub.CompareSources(pb.CompareSourcesRequest(sec_ids=[12], start="2026-10-01", end="2026-10-31",
                                                                  only_differences=True))
         latest = await stub.GetLatest(pb.GetLatestRequest(sec_ids=[12]))
+        bars = await stub.GetBars(pb.GetBarsRequest(sec_ids=[12], start="2026-10-01", end="2026-10-31", interval="month"))
+        try:
+            await stub.GetBars(pb.GetBarsRequest(sec_ids=[12], start="2026-10-01", end="2026-10-31", interval="hour"))
+            bad_interval = None
+        except grpc.aio.AioRpcError as e:
+            bad_interval = e.code()
         try:
             await stub.GetSeries(pb.GetSeriesRequest(sec_ids=[12], start="soon", end="2026-10-31"))
             bad = None
         except grpc.aio.AioRpcError as e:
             bad = e.code()
-        return series, curve, cmp, latest, bad
+        return series, curve, cmp, latest, bad, bars, bad_interval
 
-    series, curve, cmp, latest, bad = asyncio.run(_call(read))
+    series, curve, cmp, latest, bad, bars, bad_interval = asyncio.run(_call(read))
+    [b] = bars.series[0].bars
+    assert (b.start, b.open, b.high, b.low, b.close, b.last, b.source) == (
+        "2026-10-01", "0.041", "0.0412", "0.041", "0.0412", "2026-10-02", "UST-PAR")
+    assert bad_interval == grpc.StatusCode.INVALID_ARGUMENT
     assert [p.value for p in series.series[0].points] == ["0.041", "0.0412"]
     assert curve.as_of == "2026-10-02" and list(curve.missing) == ["UST-1.5M-CMT"]
     assert len(cmp.rows) == 1 and cmp.rows[0].differs
