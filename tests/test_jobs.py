@@ -36,6 +36,11 @@ def test_load_then_reads(migrated_db, monkeypatch):
     assert [p["value"] for p in series["points"]] == ["0.041", "0.0412"]
     curve = client.get("/jobs/curve", params={"name": ["UST-1.5M-CMT", "UST-10Y-CMT"]}, headers=read).json()
     assert curve["as_of"] == "2026-10-02" and curve["missing"] == ["UST-1.5M-CMT"]
+    bars = client.get("/jobs/bars", params={"name": "UST-10Y-CMT", "start": "2026-10-01", "end": "2026-10-31",
+                                           "interval": "month"}, headers=read).json()["series"][0]["bars"]
+    assert [(b["start"], b["open"], b["close"]) for b in bars] == [("2026-10-01", "0.041", "0.0412")]
+    assert client.get("/jobs/bars", params={"name": "UST-10Y-CMT", "start": "2026-10-01", "end": "2026-10-31",
+                                            "interval": "hour"}, headers=read).status_code == 422
     diffs = client.get("/jobs/compare", params={"name": "UST-10Y-CMT", "start": "2026-10-01", "end": "2026-10-31",
                                                 "only_differences": True}, headers=read).json()["rows"]
     assert len(diffs) == 1

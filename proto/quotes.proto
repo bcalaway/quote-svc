@@ -12,6 +12,10 @@ service Quotes {
   // Values over a date range for one or more instruments: golden by default,
   // or one source's.
   rpc GetSeries(GetSeriesRequest) returns (GetSeriesResponse);
+  // The same values summed up per week, month, quarter or year (or per day):
+  // open, high, low and close, computed in the database so a long view
+  // reads one bar per period, not every day.
+  rpc GetBars(GetBarsRequest) returns (GetBarsResponse);
   // Golden values for a set of instruments on one date (default: the latest
   // date any of them has). Instruments with no value that day are listed.
   rpc GetCurve(GetCurveRequest) returns (GetCurveResponse);
@@ -43,6 +47,35 @@ message Point {
   string as_of = 1;
   string value = 2;
   string source = 3;  // which source the value came from
+}
+
+message GetBarsRequest {
+  repeated int32 sec_ids = 1;
+  string start = 2;     // YYYY-MM-DD
+  string end = 3;       // YYYY-MM-DD
+  string interval = 4;  // day, week (from Monday), month, quarter, year
+  string field = 5;     // default "yield"
+  string source = 6;    // empty: golden; or UST-PAR, H15-TCM
+}
+
+message GetBarsResponse {
+  repeated BarSeries series = 1;
+}
+
+message BarSeries {
+  int32 sec_id = 1;
+  string short_name = 2;
+  repeated Bar bars = 3;
+}
+
+message Bar {
+  string start = 1;   // the period's first calendar day
+  string last = 2;    // the close's date
+  string open = 3;    // decimal strings, as in Point.value
+  string high = 4;
+  string low = 5;
+  string close = 6;
+  string source = 7;  // the close's source
 }
 
 message GetCurveRequest {

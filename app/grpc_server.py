@@ -5,7 +5,7 @@ only by other containers on the `home-platform` Docker network at
 `quote-svc:9090`. Never routed through Traefik. Runs in the same process
 and event loop as the FastAPI app (started from its lifespan in app/main.py).
 
-Serves `quote_svc.Quotes` (proto/quotes.proto): series, curves, source
+Serves `quote_svc.Quotes` (proto/quotes.proto): series, bars, curves, source
 comparisons and latest values, for mkt-api. Also the standard
 grpc.health.v1.Health service.
 """
@@ -36,6 +36,15 @@ def _series(r) -> quotes_pb2.GetSeriesResponse:
     return quotes_pb2.GetSeriesResponse(series=[
         quotes_pb2.Series(sec_id=x["sec_id"], short_name=x["short_name"],
                           points=[quotes_pb2.Point(**p) for p in x["points"]]) for x in rows])
+
+
+def _bars(r) -> quotes_pb2.GetBarsResponse:
+    start, end = _date(r.start, "start"), _date(r.end, "end")
+    with db.session() as s:
+        rows = quotes.bars(s, list(r.sec_ids), start, end, r.interval or "day", r.field or "yield", r.source)
+    return quotes_pb2.GetBarsResponse(series=[
+        quotes_pb2.BarSeries(sec_id=x["sec_id"], short_name=x["short_name"],
+                             bars=[quotes_pb2.Bar(**b) for b in x["bars"]]) for x in rows])
 
 
 def _curve(r) -> quotes_pb2.GetCurveResponse:
@@ -71,6 +80,9 @@ class Quotes(quotes_pb2_grpc.QuotesServicer):
 
     async def GetSeries(self, request, context):
         return await self._run(_series, request, context)
+
+    async def GetBars(self, request, context):
+        return await self._run(_bars, request, context)
 
     async def GetCurve(self, request, context):
         return await self._run(_curve, request, context)

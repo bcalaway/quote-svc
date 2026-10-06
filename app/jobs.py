@@ -108,6 +108,16 @@ def _ids(s, names: list[str]) -> list[int]:
         raise HTTPException(404, str(e)) from None
 
 
+@router.get("/bars", dependencies=[Depends(require_read_token)])
+def bars(name: Annotated[list[str], Query()], start: date, end: date, interval: str = "month", source: str = "") -> dict:
+    """Open, high, low and close per period (day, week, month, quarter, year), by short name."""
+    with db.session() as s:
+        try:
+            return {"series": quotes.bars(s, _ids(s, name), start, end, interval, source=source.upper())}
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from None
+
+
 @router.get("/series", dependencies=[Depends(require_read_token)])
 def series(name: Annotated[list[str], Query()], start: date, end: date, source: str = "") -> dict:
     with db.session() as s:

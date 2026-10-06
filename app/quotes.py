@@ -8,7 +8,7 @@ secmaster-svc's last load; it never calls secmaster-svc per request.
 
 from datetime import date
 
-from sqlalchemy import func, select
+from sqlalchemy import Date, Numeric, case, cast, func, literal_column, select, type_coerce
 from sqlalchemy.orm import Session
 
 from app.load import SOURCES
@@ -65,6 +65,70 @@ def series(s: Session, sec_ids: list[int], start: date, end: date, field: str = 
         out.append({"sec_id": sec_id, "short_name": nm.get(sec_id, ""),
                     "points": [{"as_of": d.isoformat(), "value": _s(v), "source": src} for d, v, src in rows]})
     return out
+
+
+INTERVALS = ("day", "week", "month", "quarter", "year")
+
+
+def _period(dialect: str, col, interval: str):
+    """SQL for the first calendar day of a date's period: its Monday, or the 1st of its month, quarter or year."""
+    if interval == "day":
+        return col
+    if dialect == "postgresql":
+        return cast(func.date_trunc(interval, col), Date)
+    # SQLite (tests): dates are ISO text.
+    if interval == "week":
+        return func.date(col, "-6 days", "weekday 1")
+    if interval == "month":
+        return func.strftime("%Y-%m-01", col)
+    if interval == "year":
+        return func.strftime("%Y-01-01", col)
+    month = cast(func.strftime("%m", col), Numeric)
+    first = case((month <= 3, "01"), (month <= 6, "04"), (month <= 9, "07"), else_="10")
+    return func.strftime("%Y-", col) + first + literal_column("'-01'")
+
+
+def bars(s: Session, sec_ids: list[int], start: date, end: date, interval: str, field: str = "yield",
+         source: str = "") -> list[dict]:
+    """Each instrument's values summed up per period: open, high, low and close, the close's date and source.
+
+    Done in the database: per period it returns only the first and last rows (window functions), with the
+    period's high and low, so a monthly view of 64 years reads about 780 rows per instrument, not 16,000.
+    """
+    stmt = bars_statement(s.get_bind().dialect.name, sec_ids, start, end, interval, field, source)
+    rows = s.execute(stmt).all()
+    nm = names(s)
+    by_id: dict[int, list[dict]] = {i: [] for i in sec_ids}
+    for r in rows:
+        period = r.p if isinstance(r.p, str) else r.p.isoformat()
+        out = by_id[r.sec_id]
+        if r.first == 1:
+            out.append({"start": period, "open": _s(r.value), "high": _s(r.high), "low": _s(r.low)})
+        if r.last == 1:
+            out[-1] |= {"last": r.as_of.isoformat() if hasattr(r.as_of, "isoformat") else str(r.as_of),
+                        "close": _s(r.value), "source": r.source}
+    return [{"sec_id": i, "short_name": nm.get(i, ""), "bars": by_id[i]} for i in sec_ids]
+
+
+def bars_statement(dialect: str, sec_ids: list[int], start: date, end: date, interval: str, field: str = "yield",
+                   source: str = ""):
+    """Per (instrument, period): the first and last rows, each with the period's high and low."""
+    if interval not in INTERVALS:
+        raise ValueError(f"interval {interval!r} isn't one of {', '.join(INTERVALS)}")
+    t = Quote if source else Golden
+    p = _period(dialect, t.as_of, interval).label("p")
+    part = (t.sec_id, _period(dialect, t.as_of, interval))
+    where = [t.sec_id.in_(sec_ids), t.field == field, t.as_of >= start, t.as_of <= end]
+    if source:
+        where.append(Quote.source == source)
+    inner = select(
+        t.sec_id, t.as_of, t.value, t.source, p,
+        func.row_number().over(partition_by=part, order_by=t.as_of).label("first"),
+        func.row_number().over(partition_by=part, order_by=t.as_of.desc()).label("last"),
+        type_coerce(func.max(t.value).over(partition_by=part), Numeric).label("high"),
+        type_coerce(func.min(t.value).over(partition_by=part), Numeric).label("low"),
+    ).where(*where).subquery()
+    return select(inner).where((inner.c.first == 1) | (inner.c.last == 1)).order_by(inner.c.sec_id, inner.c.as_of)
 
 
 def curve(s: Session, sec_ids: list[int], as_of: date | None = None, field: str = "yield") -> dict:
