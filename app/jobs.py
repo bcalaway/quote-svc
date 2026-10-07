@@ -16,7 +16,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
-from app import coverage, db, quotes
+from app import coverage, db, quotes, sanity
 from app.config import settings
 from app.load import LoadError, run_load, run_rebuild
 from app.upstream import GrpcCalendars, GrpcUpstream
@@ -82,6 +82,16 @@ def rebuild(source: str = "") -> dict:
     except LoadError as e:
         raise HTTPException(502, f"rebuild failed: {e}") from None
     return out | {"coverage": _refresh_coverage()}
+
+
+@router.post("/prices/sanity-history", dependencies=[Depends(require_token)])
+def prices_sanity_history(start: date, end: date) -> dict:
+    """Every priced day from start to end against the one before it: stale days and move sizes per type,
+    for setting app/sanity.py's limits against real history."""
+    if end < start:
+        raise HTTPException(422, "end is before start")
+    with db.session() as s:
+        return sanity.history(s, start, end)
 
 
 @router.post("/coverage", dependencies=[Depends(require_token)])
