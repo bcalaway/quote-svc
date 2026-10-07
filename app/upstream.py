@@ -30,11 +30,18 @@ class Value:
     capture_id: int
 
 
+@dataclass(frozen=True)
+class InstrumentInfo:
+    short_name: str
+    type: str  # cmt_yield, ust_bill, ust_note, ...
+    status: str  # active, matured, called, withdrawn, ...
+
+
 class Upstream(Protocol):
     def list_periods(self, source: str) -> list[Period]: ...
     def get_period(self, source: str, period: str) -> list[Value]: ...
     def resolve(self, scheme: str, keys: list[str]) -> tuple[dict[str, int], list[str]]: ...
-    def instruments(self) -> dict[int, str]: ...
+    def instruments(self) -> dict[int, InstrumentInfo]: ...
 
 
 class GrpcUpstream:
@@ -75,11 +82,11 @@ class GrpcUpstream:
         r = self._sec.Resolve(pb.ResolveRequest(scheme=scheme, values=keys), timeout=TIMEOUT_SECONDS)
         return {m.value: m.sec_id for m in r.matches}, list(r.unknown)
 
-    def instruments(self) -> dict[int, str]:
+    def instruments(self) -> dict[int, InstrumentInfo]:
         from app.grpc_gen import securities_pb2 as pb
 
         r = self._sec.ListInstruments(pb.ListInstrumentsRequest(include_inactive=True), timeout=TIMEOUT_SECONDS)
-        return {i.sec_id: i.short_name for i in r.instruments}
+        return {i.sec_id: InstrumentInfo(i.short_name, i.type, i.status) for i in r.instruments}
 
 
 class GrpcCalendars:

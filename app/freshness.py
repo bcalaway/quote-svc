@@ -13,6 +13,19 @@ Computed on each /metrics scrape, so it keeps answering when loads stop
   ACTIVE_DAYS) whose latest UST-PAR value is older than the due date.
 - **Repeats:** how many of an active instrument's latest golden values in a
   row are identical: a feed stuck on yesterday's numbers looks like this.
+
+Treasury prices (TD-PRICES; mkt-data's docs/phase-3.md, step 4):
+
+- **Due date:** FedInvest prints a day's end-of-day prices the evening of the
+  next business day (mkt-data's capture runs at 7:15 p.m. New York and
+  re-fetches the previous business day), so the prices for business day D
+  are due by 9:00 a.m. the day after that: the business day before the
+  curve's due date.
+- **Outstanding:** a Treasury security secmaster-svc calls active with a
+  TD-PRICES price in the PRICES_ACTIVE_DAYS before the due date. Matured
+  securities aren't active; auctioned ones not yet issued have no price yet.
+- **Missing:** an outstanding security whose latest price is older than the
+  due date.
 """
 
 import time
@@ -22,13 +35,16 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models import Golden, Quote
+from app.models import Golden, InstrumentRef, Quote
 
 NEW_YORK = ZoneInfo("America/New_York")
 CALENDAR = "SIFMA-US"
 SOURCE = "UST-PAR"
 DUE_HOUR = 9  # the next day, New York
 ACTIVE_DAYS = 30
+PRICES_SOURCE = "TD-PRICES"
+PRICES_FIELD = "price"
+PRICES_ACTIVE_DAYS = 10
 REPEAT_LOOKBACK = 30  # golden values read per instrument for the repeat count
 CACHE_SECONDS = 3600
 CLOSES_WINDOW = 21  # days back from today the calendar is asked about
@@ -89,3 +105,27 @@ def check(s: Session, calendars, now: datetime | None = None) -> dict:
         repeat[sec_id] = repeats(values)
     return {"due": due, "calendar_ok": ok, "last": last, "missing": {i: d < due for i, d in last.items()},
             "repeats": repeat}
+
+
+def previous_business_day(d: date, closed: set[date]) -> date:
+    d -= timedelta(days=1)
+    while d.weekday() >= 5 or d in closed:
+        d -= timedelta(days=1)
+    return d
+
+
+def check_prices(s: Session, calendars, now: datetime | None = None) -> dict:
+    """Is every outstanding Treasury security's end-of-day price in for the due date?"""
+    now = now or datetime.now(NEW_YORK)
+    today = now.astimezone(NEW_YORK).date()
+    closed, ok = closed_days(calendars, today)
+    due = previous_business_day(due_date(now, closed), closed)
+    since = due - timedelta(days=PRICES_ACTIVE_DAYS)
+    last = dict(s.execute(
+        select(Quote.sec_id, func.max(Quote.as_of))
+        .join(InstrumentRef, InstrumentRef.sec_id == Quote.sec_id)
+        .where(Quote.source == PRICES_SOURCE, Quote.field == PRICES_FIELD, Quote.as_of >= since,
+               InstrumentRef.status == "active")
+        .group_by(Quote.sec_id)
+    ).all())
+    return {"due": due, "calendar_ok": ok, "last": last, "missing": sorted(i for i, d in last.items() if d < due)}

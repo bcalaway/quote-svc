@@ -32,9 +32,9 @@ class Quote(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     sec_id: Mapped[int] = mapped_column(Integer)
-    source: Mapped[str] = mapped_column(String(20))  # an mkt-data source: UST-PAR, H15-TCM
+    source: Mapped[str] = mapped_column(String(20))  # an mkt-data source: UST-PAR, H15-TCM, TD-PRICES
     as_of: Mapped[date] = mapped_column(Date)
-    field: Mapped[str] = mapped_column(String(20))  # yield
+    field: Mapped[str] = mapped_column(String(20))  # yield; price, buy, sell
     value: Mapped[Decimal] = mapped_column(Numeric)
     observation_id: Mapped[int] = mapped_column(Integer)  # mkt-data's observation row
     capture_id: Mapped[int] = mapped_column(Integer)  # and the raw capture it came from
@@ -78,14 +78,15 @@ class Golden(Base):
 
 
 class SourcePeriod(Base):
-    """Watermark: the newest mkt-data capture each source's month was loaded from."""
+    """Watermark: the newest mkt-data capture each source's period (month, or day for TD-PRICES) was loaded from."""
 
     __tablename__ = "source_period"
 
     source: Mapped[str] = mapped_column(String(20), primary_key=True)
-    period: Mapped[str] = mapped_column(String(10), primary_key=True)  # YYYY-MM
+    period: Mapped[str] = mapped_column(String(10), primary_key=True)  # YYYY-MM, or YYYY-MM-DD
     capture_id: Mapped[int] = mapped_column(Integer)
     values: Mapped[int] = mapped_column(Integer)
+    unmapped: Mapped[int] = mapped_column(Integer, default=0)  # values skipped: their keys had no instrument
     loaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
@@ -102,12 +103,14 @@ class UnmappedKey(Base):
 
 
 class InstrumentRef(Base):
-    """secmaster-svc's short name for each sec_id, refreshed at every load."""
+    """secmaster-svc's short name, type and status for each sec_id, refreshed at every load."""
 
     __tablename__ = "instrument_ref"
 
     sec_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     short_name: Mapped[str] = mapped_column(String(40))
+    type: Mapped[str] = mapped_column(String(30), default="")  # cmt_yield, ust_note, ...
+    status: Mapped[str] = mapped_column(String(20), default="")  # active, matured, ...
     refreshed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 

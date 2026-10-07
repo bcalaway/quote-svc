@@ -41,9 +41,9 @@ def _count(model, *where):
 
 def test_first_load(migrated_db):
     out = _load(_up())
-    ust, h15 = out["sources"]
+    ust, h15, prices = out["sources"]
     assert (ust["added"], ust["reloaded"], ust["unmapped"]) == (3, 1, ["BC_30YEARDISPLAY"])
-    assert h15["added"] == 2
+    assert h15["added"] == 2 and prices["periods"] == 0
     assert _count(Quote) == 5 and _count(UnmappedKey) == 1
     # Percent to decimal, exactly; UST-PAR wins where both have a value.
     assert _golden(TEN, D1) == (Decimal("0.041"), "UST-PAR")
