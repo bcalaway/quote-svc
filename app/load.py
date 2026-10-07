@@ -1,34 +1,45 @@
-"""The load job: mkt-data's near-raw observations into quotes and golden values (phase 2, B5).
+"""The load job: mkt-data's near-raw observations into quotes and golden values.
 
+Treasury CMT yields (UST-PAR, H15-TCM; mkt-data's docs/phase-2.md, B5) and
+FedInvest's Treasury prices by CUSIP (TD-PRICES; docs/phase-3.md, step 4).
 For each source, in priority order:
 
-1. List its months from mkt-data, each with `latest_capture_id`, the newest
-   capture any of its values came from. A month whose capture id differs
-   from the watermark here (or is new) is reloaded; the rest are skipped. A
-   revision or a dropped value can only come from a newer capture of that
-   month, so it always moves the id.
-2. Read the month's current values and map each source key to an instrument
-   through secmaster-svc (one batch per source and load). Keys with no
-   instrument are recorded in `unmapped_key` and skipped.
-3. Convert to decimals (`percent` / 100, exact) and diff against the month's
+1. List its periods from mkt-data (a month for the CMTs, a day for
+   TD-PRICES), each with `latest_capture_id`, the newest capture any of its
+   values came from. A period whose capture id differs from the watermark
+   here (or is new) is reloaded; the rest are skipped. A revision or a
+   dropped value can only come from a newer capture of that period, so it
+   always moves the id.
+2. Read the period's current values and map each source key to an
+   instrument through secmaster-svc (one batch per source and load), in the
+   source's scheme: the source's own name for the CMTs, CUSIP for
+   TD-PRICES. Keys with no instrument are recorded in `unmapped_key` and
+   skipped, and the period remembers how many values it skipped. When an
+   unmapped key starts resolving (secmaster-svc loaded the security), every
+   period of that source with skipped values is reloaded.
+3. Convert to decimals (`percent` / 100 and `per_100` as is, exact), rename
+   the field where the source's name isn't ours (TD-PRICES `eod` is
+   `price`; `buy` and `sell` keep theirs), and diff against the period's
    quotes: a new value is inserted; a changed one moves the old row to
    `quote_history` as revised; a value the source no longer has moves there
    as removed.
 
-With each month, golden values are recomputed for every (sec_id, date,
-field) it touched: the highest-priority source with a value wins (UST-PAR,
-then H15-TCM; H.15 fills the years before 1990 and is a cross-check after).
+With each period, golden values are recomputed for every (sec_id, date,
+field) it touched, for the fields in PRIORITY: the highest-priority source
+with a value wins (yields: UST-PAR, then H15-TCM; H.15 fills the years
+before 1990 and is a cross-check after; prices: TD-PRICES's end of day).
+FedInvest's buy and sell prices are kept as its quotes, with no golden.
 A source can be kept out of golden for an instrument over a window
 (`GOLDEN_EXCLUDE`): its quotes are still loaded and served as that source's,
 but golden leaves the dates empty if no other source has them. Every load
 recomputes those windows, so a change to the list takes effect at the next
 load without a rebuild.
 
-Each month commits on its own (quotes, golden values, watermark), so a
+Each period commits on its own (quotes, golden values, watermark), so a
 full-history load stays small in memory and a failure keeps what's done.
 
-Idempotent: a second run with nothing new reads only the month lists. A
-rebuild clears the watermarks, so every month is re-read and corrected.
+Idempotent: a second run with nothing new reads only the period lists. A
+rebuild clears the watermarks, so every period is re-read and corrected.
 """
 
 import json
@@ -42,9 +53,14 @@ from sqlalchemy.orm import Session
 from app.models import Golden, InstrumentRef, LoadRun, Quote, QuoteHistory, SourcePeriod, UnmappedKey
 from app.upstream import Upstream
 
-# Source priority per field, highest first.
-PRIORITY = {"yield": ["UST-PAR", "H15-TCM"]}
-SOURCES = ["UST-PAR", "H15-TCM"]
+# Source priority per field, highest first. Only these fields have golden values.
+PRIORITY = {"yield": ["UST-PAR", "H15-TCM"], "price": ["TD-PRICES"]}
+CMT_SOURCES = ["UST-PAR", "H15-TCM"]
+SOURCES = [*CMT_SOURCES, "TD-PRICES"]
+# The secmaster-svc scheme a source's keys resolve in; the source's own name if not listed.
+SCHEMES = {"TD-PRICES": "CUSIP"}
+# A source's field names that aren't ours: (source, its field) -> ours.
+FIELDS = {("TD-PRICES", "eod"): "price"}
 # Source values golden doesn't use, by instrument short name: (source, first, last, why).
 GOLDEN_EXCLUDE: dict[str, list[tuple[str, date, date, str]]] = {
     # Bill, 2026-10-05: leave Treasury's 30-year gap in golden. H.15 has values on
@@ -55,16 +71,23 @@ GOLDEN_EXCLUDE: dict[str, list[tuple[str, date, date, str]]] = {
 # Dates per query when recomputing golden values (a backfill touches decades).
 GOLDEN_BATCH = 500
 # Near-raw units, and how to turn one into a decimal.
-UNITS = {"percent": Decimal(100)}
+UNITS = {"percent": Decimal(100), "per_100": Decimal(1)}  # prices stay per 100 of face
 
 
 class LoadError(RuntimeError):
     pass
 
 
-def _month(period: str) -> tuple[date, date]:
-    y, m = (int(x) for x in period.split("-"))
-    return date(y, m, 1), date(y, m, monthrange(y, m)[1])
+def _span(period: str) -> tuple[date, date]:
+    """A period's first and last day: YYYY, YYYY-MM or YYYY-MM-DD."""
+    parts = [int(x) for x in period.split("-")]
+    if len(parts) == 1:
+        return date(parts[0], 1, 1), date(parts[0], 12, 31)
+    if len(parts) == 2:
+        y, m = parts
+        return date(y, m, 1), date(y, m, monthrange(y, m)[1])
+    d = date(*parts)
+    return d, d
 
 
 def _to_decimal(value: str, unit: str) -> Decimal:
@@ -86,7 +109,7 @@ def _load_period(s: Session, up: Upstream, source: str, period: str, mapping: di
     values = up.get_period(source, period)
     new_keys = sorted({v.source_key for v in values} - set(mapping))
     if new_keys:
-        found, unknown = up.resolve(source, new_keys)
+        found, unknown = up.resolve(SCHEMES.get(source, source), new_keys)
         mapping.update(found)
         mapping.update(dict.fromkeys(unknown))
     want: dict[tuple, tuple] = {}
@@ -95,12 +118,12 @@ def _load_period(s: Session, up: Upstream, source: str, period: str, mapping: di
         if sec_id is None:
             unmapped[v.source_key] = unmapped.get(v.source_key, 0) + 1
             continue
-        key = (sec_id, date.fromisoformat(v.as_of), v.field)
+        key = (sec_id, date.fromisoformat(v.as_of), FIELDS.get((source, v.field), v.field))
         if key in want:
             raise LoadError(f"{source} {period}: two values for {v.source_key} on {v.as_of} ({v.field})")
         want[key] = (_to_decimal(v.value, v.unit), v.observation_id, v.capture_id)
 
-    first, last = _month(period)
+    first, last = _span(period)
     have = {(q.sec_id, q.as_of, q.field): q for q in s.scalars(select(Quote).where(
         Quote.source == source, Quote.as_of >= first, Quote.as_of <= last))}
     out = {"added": 0, "revised": 0, "removed": 0}
@@ -126,7 +149,19 @@ def _load_period(s: Session, up: Upstream, source: str, period: str, mapping: di
             s.delete(q)
             out["removed"] += 1
             touched.add(key)
-    return out | {"values": len(values)}, touched
+    skipped = sum(1 for v in values if mapping.get(v.source_key) is None)
+    return out | {"values": len(values), "unmapped": skipped}, touched
+
+
+def _now_resolving(s: Session, up: Upstream, source: str, mapping: dict[str, int | None]) -> list[str]:
+    """Keys recorded as unmapped that secmaster-svc now knows; they go into mapping."""
+    keys = sorted(s.scalars(select(UnmappedKey.source_key).where(UnmappedKey.source == source)))
+    if not keys:
+        return []
+    found, unknown = up.resolve(SCHEMES.get(source, source), keys)
+    mapping.update(found)
+    mapping.update(dict.fromkeys(unknown))
+    return sorted(found)
 
 
 def _exclusions(s: Session) -> dict[int, list[tuple[str, date, date]]]:
@@ -144,6 +179,7 @@ def _refresh_golden(s: Session, keys: set, now: datetime, exclude: dict | None =
     """Recompute the golden value of every touched key, a batch of dates at a time."""
     exclude = exclude or {}
     out = {"golden_set": 0, "golden_removed": 0}
+    keys = {k for k in keys if k[2] in PRIORITY}
     dates = sorted({k[1] for k in keys})
     for i in range(0, len(dates), GOLDEN_BATCH):
         chunk = dates[i:i + GOLDEN_BATCH]
@@ -154,7 +190,7 @@ def _refresh_golden(s: Session, keys: set, now: datetime, exclude: dict | None =
         golden = {(g.sec_id, g.as_of, g.field): g for g in s.scalars(select(Golden).where(Golden.as_of.in_(chunk)))}
         for key in sorted(k for k in keys if k[1] in in_chunk):
             by_source = quotes.get(key, {})
-            best = next((by_source[src] for src in PRIORITY.get(key[2], SOURCES)
+            best = next((by_source[src] for src in PRIORITY[key[2]]
                          if src in by_source and _usable(src, key, exclude)), None)
             g = golden.get(key)
             if best is None:
@@ -173,14 +209,15 @@ def _refresh_golden(s: Session, keys: set, now: datetime, exclude: dict | None =
 
 
 def _refresh_names(s: Session, up: Upstream, now: datetime) -> int:
-    names = up.instruments()
-    for sec_id, name in names.items():
+    infos = up.instruments()
+    for sec_id, i in infos.items():
         row = s.get(InstrumentRef, sec_id)
         if row is None:
-            s.add(InstrumentRef(sec_id=sec_id, short_name=name, refreshed_at=now))
+            s.add(InstrumentRef(sec_id=sec_id, short_name=i.short_name, type=i.type, status=i.status,
+                                refreshed_at=now))
         else:
-            row.short_name, row.refreshed_at = name, now
-    return len(names)
+            row.short_name, row.type, row.status, row.refreshed_at = i.short_name, i.type, i.status, now
+    return len(infos)
 
 
 def _load(s: Session, up: Upstream, now: datetime, progress: dict) -> dict:
@@ -200,11 +237,18 @@ def _load(s: Session, up: Upstream, now: datetime, progress: dict) -> dict:
         marks = dict(s.execute(select(SourcePeriod.period, SourcePeriod.capture_id)
                                .where(SourcePeriod.source == source)).all())
         periods = up.list_periods(source)
-        todo = [p for p in periods if marks.get(p.period) != p.latest_capture_id]
         mapping: dict[str, int | None] = {}
+        resolving = _now_resolving(s, up, source, mapping)
+        if resolving:
+            # Periods that skipped values may hold these keys: forget their watermarks.
+            for (period,) in s.execute(select(SourcePeriod.period).where(
+                    SourcePeriod.source == source, SourcePeriod.unmapped > 0)).all():
+                marks.pop(period, None)
+        todo = [p for p in periods if marks.get(p.period) != p.latest_capture_id]
         unmapped: dict[str, int] = {}
         totals = {"added": 0, "revised": 0, "removed": 0, "values": 0}
-        entry = {"source": source, "periods": len(periods), "reloaded": 0, "unmapped": [], **totals}
+        entry = {"source": source, "periods": len(periods), "reloaded": 0, "now_resolving": len(resolving),
+                 "unmapped": [], **totals}
         progress["sources"].append(entry)
         for p in todo:
             out, keys = _load_period(s, up, source, p.period, mapping, unmapped, now)
@@ -214,9 +258,10 @@ def _load(s: Session, up: Upstream, now: datetime, progress: dict) -> dict:
             mark = s.get(SourcePeriod, (source, p.period))
             if mark is None:
                 s.add(SourcePeriod(source=source, period=p.period, capture_id=p.latest_capture_id,
-                                   values=out["values"], loaded_at=now))
+                                   values=out["values"], unmapped=out["unmapped"], loaded_at=now))
             else:
-                mark.capture_id, mark.values, mark.loaded_at = p.latest_capture_id, out["values"], now
+                mark.capture_id, mark.values, mark.unmapped, mark.loaded_at = (
+                    p.latest_capture_id, out["values"], out["unmapped"], now)
             s.commit()
             s.expunge_all()
             for k in totals:
@@ -233,7 +278,8 @@ def _load(s: Session, up: Upstream, now: datetime, progress: dict) -> dict:
         if mapped_now:
             s.execute(delete(UnmappedKey).where(UnmappedKey.source == source, UnmappedKey.source_key.in_(mapped_now)))
         s.commit()
-        entry["unmapped"] = sorted(unmapped)
+        entry["unmapped"] = sorted(unmapped)[:50]
+        entry["unmapped_keys"] = len(unmapped)
     # Re-apply the exclusion windows, so a change to GOLDEN_EXCLUDE reaches golden values already set.
     windows = {(q.sec_id, q.as_of, q.field) for sec_id, ws in exclude.items() for _, lo, hi in ws
                for q in s.scalars(select(Quote).where(Quote.sec_id == sec_id, Quote.as_of >= lo, Quote.as_of <= hi))}

@@ -37,6 +37,8 @@ router = APIRouter()
 
 # Dates and gaps listed per instrument or series in the detail metrics.
 DETAIL_LIMIT = 20
+# Unmapped keys listed per source (TD-PRICES has hundreds until secmaster-svc's backfill).
+UNMAPPED_LIMIT = 50
 
 
 def _num(v) -> str:
@@ -96,6 +98,21 @@ def _freshness(s, out: _Out, name, calendars) -> None:
                [({"instrument": name(i)}, n) for i, n in sorted(f["repeats"].items())])
 
 
+def _prices_freshness(s, out: _Out, name, calendars) -> None:
+    f = freshness.check_prices(s, calendars)
+    out.metric("quote_svc_prices_due_date_timestamp_seconds", "gauge",
+               "The latest SIFMA-US business day whose Treasury end-of-day prices are due (FedInvest prints them the "
+               "next business day evening; due by 9:00 a.m. New York the day after).", [({}, _day_epoch(f["due"]))])
+    out.metric("quote_svc_prices_outstanding", "gauge",
+               f"Active Treasury securities with a TD-PRICES price in the {freshness.PRICES_ACTIVE_DAYS} days before "
+               "the due date.", [({}, len(f["last"]))])
+    out.metric("quote_svc_prices_missing_count", "gauge",
+               "Outstanding Treasury securities with no TD-PRICES price for the due date.", [({}, len(f["missing"]))])
+    out.metric("quote_svc_prices_missing", "gauge",
+               f"1 for each outstanding security with no price for the due date (the first {DETAIL_LIMIT}).",
+               [({"instrument": name(i)}, 1) for i in f["missing"][:DETAIL_LIMIT]])
+
+
 def render(s, calendars=None) -> str:
     out = _Out()
     names = dict(s.execute(select(InstrumentRef.sec_id, InstrumentRef.short_name)).all())
@@ -114,7 +131,7 @@ def render(s, calendars=None) -> str:
     by_source = s.execute(select(Quote.source, func.count()).group_by(Quote.source)).all()
     out.metric("quote_svc_quotes", "gauge", "Current quotes, by source.", [({"source": k}, n) for k, n in sorted(by_source)])
     periods = s.execute(select(SourcePeriod.source, func.count()).group_by(SourcePeriod.source)).all()
-    out.metric("quote_svc_source_periods", "gauge", "Months loaded, by source.", [({"source": k}, n) for k, n in sorted(periods)])
+    out.metric("quote_svc_source_periods", "gauge", "Periods loaded (months; days for TD-PRICES), by source.", [({"source": k}, n) for k, n in sorted(periods)])
     history = s.execute(select(QuoteHistory.source, QuoteHistory.reason, func.count())
                         .group_by(QuoteHistory.source, QuoteHistory.reason)).all()
     out.metric("quote_svc_superseded_quotes", "gauge", "Earlier values kept in quote_history, by source and reason.",
@@ -202,9 +219,17 @@ def render(s, calendars=None) -> str:
     out.metric("quote_svc_unmapped_keys", "gauge",
                "Source keys secmaster-svc has no instrument for (their values aren't loaded), by source.",
                [({"source": k}, n) for k, n in sorted(per_source.items())])
-    out.metric("quote_svc_unmapped_key", "gauge", "1 for each unmapped source key, with its values in the last months read.",
-               [({"source": u.source, "key": u.source_key}, u.values) for u in unmapped])
+    shown: dict[str, int] = {}
+    key_samples = []
+    for u in unmapped:
+        if shown.get(u.source, 0) < UNMAPPED_LIMIT:
+            shown[u.source] = shown.get(u.source, 0) + 1
+            key_samples.append(({"source": u.source, "key": u.source_key}, u.values))
+    out.metric("quote_svc_unmapped_key", "gauge",
+               f"Each unmapped source key (the first {UNMAPPED_LIMIT} per source), with its values in the last periods read.",
+               key_samples)
     _freshness(s, out, name, calendars or _calendars)
+    _prices_freshness(s, out, name, calendars or _calendars)
     return out.text()
 
 

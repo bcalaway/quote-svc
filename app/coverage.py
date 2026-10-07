@@ -22,11 +22,11 @@ from typing import Protocol
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.load import SOURCES
+from app.load import CMT_SOURCES
 from app.models import CoverageGap, CoverageSeries, Golden, InstrumentRef, Quote
 
 CALENDAR_ORDER = ["SIFMA-US", "FED"]
-SERIES = ["golden", *SOURCES]
+SERIES = ["golden", *CMT_SOURCES]  # CMT yields; prices have their own freshness check
 FIELD = "yield"
 
 
