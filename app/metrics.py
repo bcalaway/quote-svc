@@ -18,7 +18,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import aliased
 
 from app import coverage as coverage_mod
-from app import db, freshness
+from app import db, freshness, sanity
 from app.config import settings
 from app.models import (
     CoverageGap,
@@ -111,6 +111,29 @@ def _prices_freshness(s, out: _Out, name, calendars) -> None:
     out.metric("quote_svc_prices_missing", "gauge",
                f"1 for each outstanding security with no price for the due date (the first {DETAIL_LIMIT}).",
                [({"instrument": name(i)}, 1) for i in f["missing"][:DETAIL_LIMIT]])
+    _prices_sanity(s, out, name, f["due"])
+
+
+def _prices_sanity(s, out: _Out, name, due) -> None:
+    c = sanity.check(s, due)
+    out.metric("quote_svc_prices_sanity_date_timestamp_seconds", "gauge",
+               "The latest day with Treasury end-of-day prices on or before their due date: the day the price "
+               "sanity metrics describe.", [({}, _day_epoch(c["day"]))] if c["day"] else [])
+    out.metric("quote_svc_prices_compared", "gauge",
+               "Active Treasury securities with a price on that day and the priced day before.",
+               [({}, c["compared"])])
+    out.metric("quote_svc_prices_unchanged_ratio", "gauge",
+               "The share of those whose price didn't move: near 0 on a real day; a repeated page leaves most "
+               f"unchanged (stale above {sanity.UNCHANGED_LIMIT} with at least {sanity.MIN_COMPARED} compared).",
+               [({}, _num(c["unchanged_ratio"]))])
+    out.metric("quote_svc_prices_stale", "gauge", "1 if that day's prices look like a repeat of the day before.",
+               [({}, int(c["stale"]))])
+    out.metric("quote_svc_prices_jumps_count", "gauge",
+               "Securities whose price moved more than their type plausibly can in a day (app/sanity.py MAX_MOVE).",
+               [({}, len(c["jumps"]))])
+    out.metric("quote_svc_prices_jump", "gauge",
+               f"Each such move, per 100 (the first {DETAIL_LIMIT}, largest against its limit first).",
+               [({"instrument": name(j["sec_id"]), "type": j["type"]}, _num(j["change"])) for j in c["jumps"][:DETAIL_LIMIT]])
 
 
 def render(s, calendars=None) -> str:
