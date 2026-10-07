@@ -34,17 +34,17 @@ FIELD = "price"
 MAX_MOVE = {
     "ust_bill": Decimal("0.5"),
     "ust_frn": Decimal("0.5"),
-    "ust_note": Decimal(3),
-    "ust_tips": Decimal(5),
-    "ust_bond": Decimal(8),
+    "ust_note": Decimal(5),
+    "ust_tips": Decimal(15),
+    "ust_bond": Decimal(12),
 }
-DEFAULT_MAX_MOVE = Decimal(8)
+DEFAULT_MAX_MOVE = Decimal(15)
 UNCHANGED_LIMIT = Decimal("0.5")
 MIN_COMPARED = 50
 # Absolute moves per 100 counted per type in `history`: how many moves were larger than each.
 EDGES = tuple(Decimal(x) for x in ("0.05", "0.1", "0.25", "0.5", "1", "2", "3", "4", "5", "6", "8", "10", "15"))
 HISTORY_TOP = 10
-HISTORY_DAYS_LISTED = 50
+HISTORY_DAYS_LISTED = 50  # the days with the most unchanged, and the days with jumps, each
 
 
 def _num(v: Decimal) -> str:
@@ -112,7 +112,8 @@ def history(s: Session, start: date, end: date) -> dict:
     )
     days = stale = 0
     ratios = {"over_0.1": 0, "over_0.25": 0, "over_0.5": 0}
-    listed: list[dict] = []
+    most_unchanged: list = []  # heap of (ratio, day, before, compared)
+    jump_days: list[dict] = []
     moves: dict[str, dict] = {}
     top: dict[str, list] = {}
     prev: dict[int, Decimal] | None = None
@@ -125,9 +126,16 @@ def history(s: Session, start: date, end: date) -> dict:
             stale += r["stale"]
             for k, lim in (("over_0.1", "0.1"), ("over_0.25", "0.25"), ("over_0.5", "0.5")):
                 ratios[k] += r["unchanged_ratio"] > Decimal(lim)
-            if r["unchanged_ratio"] > Decimal("0.1") and len(listed) < HISTORY_DAYS_LISTED:
-                listed.append({"day": day.isoformat(), "before": prev_day.isoformat(), "compared": r["compared"],
-                               "unchanged_ratio": str(r["unchanged_ratio"])})
+            entry = (r["unchanged_ratio"], day.isoformat(), prev_day.isoformat(), r["compared"])
+            if len(most_unchanged) < HISTORY_DAYS_LISTED:
+                heapq.heappush(most_unchanged, entry)
+            elif entry > most_unchanged[0]:
+                heapq.heapreplace(most_unchanged, entry)
+            if r["jumps"] and len(jump_days) < HISTORY_DAYS_LISTED:
+                worst = r["jumps"][0]
+                jump_days.append({"day": day.isoformat(), "before": prev_day.isoformat(), "jumps": len(r["jumps"]),
+                                  "worst": refs.get(worst["sec_id"], (str(worst["sec_id"]), ""))[0],
+                                  "change": _num(worst["change"])})
             for i in set(today) & set(prev):
                 t = types.get(i, "") or "unknown"
                 change = today[i] - prev[i]
@@ -153,6 +161,9 @@ def history(s: Session, start: date, end: date) -> dict:
         for t, h in sorted(top.items())
     }
     return {"start": start.isoformat(), "end": end.isoformat(), "days": days, "stale_days": stale,
-            "unchanged_ratio_days": ratios, "days_listed": listed,
+            "unchanged_ratio_days": ratios,
+            "most_unchanged": [{"day": d, "before": b, "compared": n, "unchanged_ratio": str(x)}
+                               for x, d, b, n in sorted(most_unchanged, reverse=True)],
+            "jump_days": jump_days,
             "limits": {t: str(v) for t, v in MAX_MOVE.items()}, "moves": dict(sorted(moves.items())),
             "largest": largest}

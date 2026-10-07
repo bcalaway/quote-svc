@@ -43,8 +43,10 @@ def price_sanity_history():
         start, end = date.fromisoformat(p["start"]), date.fromisoformat(p["end"])
         r = call_app_job("quote-svc", f"prices/sanity-history?start={start}&end={end}", timeout=1800)
         print(f"{r['days']} days compared, {r['stale_days']} stale; unchanged ratio: {r['unchanged_ratio_days']}")
-        for d in r["days_listed"]:
+        for d in r["most_unchanged"]:
             print(f"unchanged: {d}")
+        for d in r["jump_days"]:
+            print(f"jumps: {d}")
         for t, m in r["moves"].items():
             print(f"moves {t}: {m}")
         for t, rows in r["largest"].items():
