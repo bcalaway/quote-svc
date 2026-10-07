@@ -47,6 +47,9 @@ def price_sanity_history():
             print(f"unchanged: {d}")
         for d in r["jump_days"]:
             print(f"jumps: {d}")
+        print(f"{len(r['gaps'])} gaps between priced days, {r['gap_weekdays']} weekdays without prices")
+        for g in r["gaps"]:
+            print(f"gap: {g}")
         for t, m in r["moves"].items():
             print(f"moves {t}: {m}")
         for t, rows in r["largest"].items():

@@ -31,6 +31,9 @@ def test_a_repeated_page_is_stale():
     r = sanity.compare_days(today, before, {})
     assert r["stale"] and r["unchanged_ratio"] == D("0.9833") and not r["jumps"]
     assert not sanity.compare_days({i: v + D("0.01") for i, v in before.items()}, before, {})["stale"]
+    # A quiet real day: about half the coupon prices don't move a 64th (history's highest is 0.54).
+    quiet = {i: v + (D("0.01") if i % 2 else 0) for i, v in before.items()}
+    assert not sanity.compare_days(quiet, before, {})["stale"]
 
 
 def _refs(s):
@@ -82,6 +85,7 @@ def test_history(migrated_db):
     assert r["most_unchanged"] == [
         {"day": "2026-10-06", "before": "2026-10-05", "compared": 4, "unchanged_ratio": "0.2500"},
         {"day": "2026-10-05", "before": "2026-10-02", "compared": 4, "unchanged_ratio": "0.0000"}]
+    assert r["gaps"] == [] and r["gap_weekdays"] == 0
     assert r["jump_days"] == [{"day": "2026-10-06", "before": "2026-10-05", "jumps": 1,
                                "worst": "UST-4.25-2035-08-15", "change": "5.4"}]
     assert r["moves"][NOTE]["moves"] == 4 and r["moves"][NOTE]["over_limit"] == 1
@@ -103,3 +107,14 @@ def test_history_job(migrated_db, monkeypatch):
     assert r.status_code == 200 and r.json()["days"] == 2
     bad = client.post("/jobs/prices/sanity-history", params={"start": "2026-10-31", "end": "2026-10-01"}, headers=auth)
     assert bad.status_code == 422
+
+
+def test_history_lists_gaps(migrated_db):
+    with db.session() as s:
+        _refs(s)
+        for day in (date(2018, 10, 26), date(2018, 10, 29), date(2019, 1, 2), date(2019, 1, 3)):
+            _price(s, 1, day, "99")
+        s.commit()
+        r = sanity.history(s, date(2018, 10, 1), date(2019, 1, 31))
+    # Friday to Monday is no gap; October 29th to January 2nd is (46 weekdays, holidays included).
+    assert r["gaps"] == [{"after": "2018-10-29", "next": "2019-01-02", "weekdays_missing": 46}]

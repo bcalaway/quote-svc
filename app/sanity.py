@@ -39,11 +39,12 @@ MAX_MOVE = {
     "ust_bond": Decimal(12),
 }
 DEFAULT_MAX_MOVE = Decimal(15)
-UNCHANGED_LIMIT = Decimal("0.5")
+UNCHANGED_LIMIT = Decimal("0.8")
 MIN_COMPARED = 50
 # Absolute moves per 100 counted per type in `history`: how many moves were larger than each.
 EDGES = tuple(Decimal(x) for x in ("0.05", "0.1", "0.25", "0.5", "1", "2", "3", "4", "5", "6", "8", "10", "15"))
 HISTORY_TOP = 10
+GAP_DAYS = 4  # more calendar days than this between priced days is a gap (a Friday to Tuesday holiday is 4)
 HISTORY_DAYS_LISTED = 50  # the days with the most unchanged, and the days with jumps, each
 
 
@@ -114,6 +115,7 @@ def history(s: Session, start: date, end: date) -> dict:
     ratios = {"over_0.1": 0, "over_0.25": 0, "over_0.5": 0}
     most_unchanged: list = []  # heap of (ratio, day, before, compared)
     jump_days: list[dict] = []
+    gaps: list[dict] = []
     moves: dict[str, dict] = {}
     top: dict[str, list] = {}
     prev: dict[int, Decimal] | None = None
@@ -126,6 +128,10 @@ def history(s: Session, start: date, end: date) -> dict:
             stale += r["stale"]
             for k, lim in (("over_0.1", "0.1"), ("over_0.25", "0.25"), ("over_0.5", "0.5")):
                 ratios[k] += r["unchanged_ratio"] > Decimal(lim)
+            if (day - prev_day).days > GAP_DAYS:
+                gaps.append({"after": prev_day.isoformat(), "next": day.isoformat(),
+                             "weekdays_missing": sum(1 for n in range(1, (day - prev_day).days)
+                                                     if date.fromordinal(prev_day.toordinal() + n).weekday() < 5)})
             entry = (r["unchanged_ratio"], day.isoformat(), prev_day.isoformat(), r["compared"])
             if len(most_unchanged) < HISTORY_DAYS_LISTED:
                 heapq.heappush(most_unchanged, entry)
@@ -165,5 +171,6 @@ def history(s: Session, start: date, end: date) -> dict:
             "most_unchanged": [{"day": d, "before": b, "compared": n, "unchanged_ratio": str(x)}
                                for x, d, b, n in sorted(most_unchanged, reverse=True)],
             "jump_days": jump_days,
+            "gaps": gaps, "gap_weekdays": sum(g["weekdays_missing"] for g in gaps),
             "limits": {t: str(v) for t, v in MAX_MOVE.items()}, "moves": dict(sorted(moves.items())),
             "largest": largest}
