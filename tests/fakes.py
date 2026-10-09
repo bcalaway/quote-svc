@@ -9,16 +9,25 @@ KEYS = {
     "H15-TCM": {"RIFLGFCY10_N.B": 12},
     # Three securities in FedInvest's 2026-10-05 page (tests/fixtures): a bill, a note, a TIPS.
     "CUSIP": {"912797UJ4": 101, "91282CRK9": 102, "912810FD5": 103},
+    "NYFED-SOFR": {"SOFR": 201},
+    "NYFED-EFFR": {"EFFR": 202},
+    "FRB-H10-RATES": {"RXI$US_N.B.EU": 203, "RXI_N.B.JA": 204},
+    "FRB-H10": {"JRXWTFB_N.B": 205},
+    "ECB-EXR": {"EXR.D.JPY.EUR.SP00.A": 206},
 }
 NAMES = {12: "UST-10Y-CMT", 2: "UST-1.5M-CMT", 101: "UST-B-2026-10-08", 102: "UST-3.5-2028-09-30",
-         103: "UST-TII-3.625-2028-04-15"}
-TYPES = {12: "cmt_yield", 2: "cmt_yield", 101: "ust_bill", 102: "ust_note", 103: "ust_tips"}
+         103: "UST-TII-3.625-2028-04-15", 201: "SOFR", 202: "EFFR", 203: "EURUSD-H10", 204: "USDJPY-H10",
+         205: "USD-BROAD-H10", 206: "EURJPY-ECB"}
+TYPES = {12: "cmt_yield", 2: "cmt_yield", 101: "ust_bill", 102: "ust_note", 103: "ust_tips", 201: "rate_fixing",
+         202: "rate_fixing", 203: "fx_fixing", 204: "fx_fixing", 205: "fx_index", 206: "fx_fixing"}
 
 
 class FakeUpstream:
     def __init__(self):
         # source -> period -> (capture_id, [(key, as_of, value)])
-        self.data: dict[str, dict[str, tuple[int, list]]] = {"UST-PAR": {}, "H15-TCM": {}, "TD-PRICES": {}}
+        from app.load import SOURCES
+
+        self.data: dict[str, dict[str, tuple[int, list]]] = {src: {} for src in SOURCES}
         self.status: dict[int, str] = {}  # sec_id -> status, "active" if not set
         self.reads: list[tuple[str, str]] = []
         self.resolves: list[tuple[str, list[str]]] = []

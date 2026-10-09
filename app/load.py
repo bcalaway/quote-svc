@@ -1,7 +1,10 @@
 """The load job: mkt-data's near-raw observations into quotes and golden values.
 
-Treasury CMT yields (UST-PAR, H15-TCM; mkt-data's docs/phase-2.md, B5) and
-FedInvest's Treasury prices by CUSIP (TD-PRICES; docs/phase-3.md, step 4).
+Treasury CMT yields (UST-PAR, H15-TCM; mkt-data's docs/phase-2.md, B5),
+FedInvest's Treasury prices by CUSIP (TD-PRICES; docs/phase-3.md, step 4) and
+the fixings (docs/phase-4.md, step 4): SOFR and EFFR with their percentiles,
+volume and target range, the H.10 rates and dollar indexes, and the ECB's
+reference rates, each FX rate in its source's own direction.
 For each source, in priority order:
 
 1. List its periods from mkt-data (a month for the CMTs, a day for
@@ -43,6 +46,7 @@ rebuild clears the watermarks, so every period is re-read and corrected.
 """
 
 import json
+import re
 from calendar import monthrange
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -53,14 +57,25 @@ from sqlalchemy.orm import Session
 from app.models import Golden, InstrumentRef, LoadRun, Quote, QuoteHistory, SourcePeriod, UnmappedKey
 from app.upstream import Upstream
 
+# The fixings (mkt-data's docs/phase-4.md, step 4): the New York Fed's SOFR and EFFR, the Fed's H.10
+# rates and dollar indexes, the ECB's euro reference rates. Each instrument has one source, so its golden
+# value is that source's. No averages (the SOFR Averages and Index): analytics, for a later phase.
+FIXING_SOURCES = ["NYFED-SOFR", "NYFED-EFFR", "FRB-H10-RATES", "FRB-H10", "ECB-EXR"]
 # Source priority per field, highest first. Only these fields have golden values.
-PRIORITY = {"yield": ["UST-PAR", "H15-TCM"], "price": ["TD-PRICES"]}
+PRIORITY = {"yield": ["UST-PAR", "H15-TCM"], "price": ["TD-PRICES"],
+            "rate": ["NYFED-SOFR", "NYFED-EFFR", "FRB-H10-RATES", "ECB-EXR"], "index": ["FRB-H10"]}
 CMT_SOURCES = ["UST-PAR", "H15-TCM"]
-SOURCES = [*CMT_SOURCES, "TD-PRICES"]
+SOURCES = [*CMT_SOURCES, "TD-PRICES", *FIXING_SOURCES]
 # The secmaster-svc scheme a source's keys resolve in; the source's own name if not listed.
 SCHEMES = {"TD-PRICES": "CUSIP"}
+# The New York Fed's field names, as mkt-data keeps them, and ours.
+NYFED_FIELDS = {"percentRate": "rate", "percentPercentile1": "rate_p1", "percentPercentile25": "rate_p25",
+                "percentPercentile75": "rate_p75", "percentPercentile99": "rate_p99", "volumeInBillions": "volume_bn",
+                "targetRateFrom": "target_low", "targetRateTo": "target_high", "intraDayHigh": "intraday_high",
+                "intraDayLow": "intraday_low", "stdDeviation": "std_dev"}
 # A source's field names that aren't ours: (source, its field) -> ours.
-FIELDS = {("TD-PRICES", "eod"): "price"}
+FIELDS = {("TD-PRICES", "eod"): "price", ("FRB-H10-RATES", "value"): "rate", ("FRB-H10", "value"): "index",
+          **{(src, k): v for src in ("NYFED-SOFR", "NYFED-EFFR") for k, v in NYFED_FIELDS.items()}}
 # Source values golden doesn't use, by instrument short name: (source, first, last, why).
 GOLDEN_EXCLUDE: dict[str, list[tuple[str, date, date, str]]] = {
     # Bill, 2026-10-05: leave Treasury's 30-year gap in golden. H.15 has values on
@@ -71,7 +86,11 @@ GOLDEN_EXCLUDE: dict[str, list[tuple[str, date, date, str]]] = {
 # Dates per query when recomputing golden values (a backfill touches decades).
 GOLDEN_BATCH = 500
 # Near-raw units, and how to turn one into a decimal.
-UNITS = {"percent": Decimal(100), "per_100": Decimal(1)}  # prices stay per 100 of face
+UNITS = {"percent": Decimal(100), "per_100": Decimal(1),  # prices stay per 100 of face
+         "USD billions": Decimal(1), "index": Decimal(1)}
+# FX rates stay as printed, in the source's own direction: H.10's "JPY currency" (yen per dollar, or dollars
+# per unit for its $US series) and the ECB's "JPY per EUR".
+FX_UNIT = re.compile(r"^[A-Z]{3} (currency|per [A-Z]{3})$")
 
 
 class LoadError(RuntimeError):
@@ -91,6 +110,8 @@ def _span(period: str) -> tuple[date, date]:
 
 
 def _to_decimal(value: str, unit: str) -> Decimal:
+    if FX_UNIT.match(unit):
+        return Decimal(value)
     if unit not in UNITS:
         raise LoadError(f"unit {unit!r} has no conversion; known: {sorted(UNITS)}")
     return Decimal(value) / UNITS[unit]
