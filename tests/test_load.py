@@ -164,3 +164,32 @@ def test_an_excluded_window_leaves_golden_empty_but_keeps_the_quote(migrated_db,
     up.put("UST-PAR", "2026-10", 39, [("BC_10YEAR", D1, "4.10"), ("BC_10YEAR", D2, "4.12")])
     _load(up)
     assert _golden(TEN, D2) == (Decimal("0.0412"), "UST-PAR")
+
+
+def test_golden_refresh_reads_only_the_touched_instruments(migrated_db):
+    """A month of one instrument's quotes mustn't read every other instrument's on those dates (2026-10-09:
+    an ECB month read 21 days of FedInvest prices and quote-svc ran out of memory)."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy import event
+
+    from app.load import _refresh_golden
+
+    now = datetime(2026, 10, 9, tzinfo=UTC)
+    day = date(2026, 10, 1)
+    with db.session() as s:
+        s.add(Quote(sec_id=1, source="ECB-EXR", as_of=day, field="rate", value=Decimal("162.5"),
+                    observation_id=1, capture_id=1, loaded_at=now))
+        for i in range(2, 302):
+            s.add(Quote(sec_id=i, source="TD-PRICES", as_of=day, field="price", value=Decimal("99.5"),
+                        observation_id=i, capture_id=1, loaded_at=now))
+        s.commit()
+    with db.session() as s:
+        rows = []
+        event.listen(s, "loaded_as_persistent", lambda _s, obj: rows.append(obj))
+        out = _refresh_golden(s, {(1, day, "rate")}, now)
+        s.commit()
+        assert out == {"golden_set": 1, "golden_removed": 0}
+        assert rows == []  # no Quote objects loaded at all, let alone the other 300 instruments'
+        g = s.scalars(select(Golden)).one()
+        assert (g.sec_id, g.value, g.source) == (1, Decimal("162.5"), "ECB-EXR")

@@ -33,6 +33,9 @@ FROM dev AS test
 RUN pytest
 
 FROM base AS final
+# Two malloc arenas, not one per thread: jobs run in worker threads, and glibc's default keeps each thread's
+# freed memory in its own arena, so the process grows after every large load and keeps it (as secmaster-svc).
+ENV MALLOC_ARENA_MAX=2
 # 8000: HTTP, routed by Traefik. 9090: gRPC, internal to home-platform only.
 EXPOSE 8000 9090
 # Applies migrations (when a database is configured), then runs uvicorn.

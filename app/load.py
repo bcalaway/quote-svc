@@ -50,6 +50,7 @@ import re
 from calendar import monthrange
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import NamedTuple
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -196,6 +197,11 @@ def _usable(source: str, key: tuple, exclude: dict) -> bool:
     return not any(src == source and lo <= key[1] <= hi for src, lo, hi in exclude.get(key[0], ()))
 
 
+class _Best(NamedTuple):
+    source: str
+    value: Decimal
+
+
 def _refresh_golden(s: Session, keys: set, now: datetime, exclude: dict | None = None) -> dict:
     """Recompute the golden value of every touched key, a batch of dates at a time."""
     exclude = exclude or {}
@@ -205,11 +211,20 @@ def _refresh_golden(s: Session, keys: set, now: datetime, exclude: dict | None =
     for i in range(0, len(dates), GOLDEN_BATCH):
         chunk = dates[i:i + GOLDEN_BATCH]
         in_chunk = set(chunk)
-        quotes: dict[tuple, dict[str, Quote]] = {}
-        for q in s.scalars(select(Quote).where(Quote.as_of.in_(chunk))):
-            quotes.setdefault((q.sec_id, q.as_of, q.field), {})[q.source] = q
-        golden = {(g.sec_id, g.as_of, g.field): g for g in s.scalars(select(Golden).where(Golden.as_of.in_(chunk)))}
-        for key in sorted(k for k in keys if k[1] in in_chunk):
+        wanted = sorted(k for k in keys if k[1] in in_chunk)
+        # Only the touched instruments' quotes and golden values, as plain rows: every source's quotes on
+        # these dates were read before, so a month of ECB rates also read 21 days of FedInvest prices
+        # (~100,000 quotes) and took the 256 MB container past its limit (2026-10-09).
+        sec_ids = sorted({k[0] for k in wanted})
+        fields = sorted({k[2] for k in wanted})
+        quotes: dict[tuple, dict[str, _Best]] = {}
+        for sec_id, as_of, field, source, value in s.execute(
+                select(Quote.sec_id, Quote.as_of, Quote.field, Quote.source, Quote.value).where(
+                    Quote.as_of.in_(chunk), Quote.sec_id.in_(sec_ids), Quote.field.in_(fields))):
+            quotes.setdefault((sec_id, as_of, field), {})[source] = _Best(source, value)
+        golden = {(g.sec_id, g.as_of, g.field): g for g in s.scalars(select(Golden).where(
+            Golden.as_of.in_(chunk), Golden.sec_id.in_(sec_ids), Golden.field.in_(fields)))}
+        for key in wanted:
             by_source = quotes.get(key, {})
             best = next((by_source[src] for src in PRIORITY[key[2]]
                          if src in by_source and _usable(src, key, exclude)), None)
