@@ -14,12 +14,14 @@ KEYS = {
     "FRB-H10-RATES": {"RXI$US_N.B.EU": 203, "RXI_N.B.JA": 204},
     "FRB-H10": {"JRXWTFB_N.B": 205},
     "ECB-EXR": {"EXR.D.JPY.EUR.SP00.A": 206},
+    "CFTC": {"043602": 301},  # both CFTC reports resolve in secmaster-svc's CFTC scheme
 }
 NAMES = {12: "UST-10Y-CMT", 2: "UST-1.5M-CMT", 101: "UST-B-2026-10-08", 102: "UST-3.5-2028-09-30",
          103: "UST-TII-3.625-2028-04-15", 201: "SOFR", 202: "EFFR", 203: "EURUSD-H10", 204: "USDJPY-H10",
-         205: "USD-BROAD-H10", 206: "EURJPY-ECB"}
+         205: "USD-BROAD-H10", 206: "EURJPY-ECB", 301: "TY"}
 TYPES = {12: "cmt_yield", 2: "cmt_yield", 101: "ust_bill", 102: "ust_note", 103: "ust_tips", 201: "rate_fixing",
-         202: "rate_fixing", 203: "fx_fixing", 204: "fx_fixing", 205: "fx_index", 206: "fx_fixing"}
+         202: "rate_fixing", 203: "fx_fixing", 204: "fx_fixing", 205: "fx_index", 206: "fx_fixing",
+         301: "fut_product"}
 
 
 class FakeUpstream:

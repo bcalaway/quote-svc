@@ -66,17 +66,45 @@ FIXING_SOURCES = ["NYFED-SOFR", "NYFED-EFFR", "FRB-H10-RATES", "FRB-H10", "ECB-E
 PRIORITY = {"yield": ["UST-PAR", "H15-TCM"], "price": ["TD-PRICES"],
             "rate": ["NYFED-SOFR", "NYFED-EFFR", "FRB-H10-RATES", "ECB-EXR"], "index": ["FRB-H10"]}
 CMT_SOURCES = ["UST-PAR", "H15-TCM"]
-SOURCES = [*CMT_SOURCES, "TD-PRICES", *FIXING_SOURCES]
+# The CFTC's Traders in Financial Futures report (step 5), futures only and with options: weekly positions
+# on each futures product, keyed by the CFTC's contract market code. The two reports count different things
+# (options delta-adjusted in the second), so each stays its own source, with no golden value.
+POSITIONING_SOURCES = ["CFTC-TFF", "CFTC-TFF-COMBINED"]
+SOURCES = [*CMT_SOURCES, "TD-PRICES", *FIXING_SOURCES, *POSITIONING_SOURCES]
 # The secmaster-svc scheme a source's keys resolve in; the source's own name if not listed.
-SCHEMES = {"TD-PRICES": "CUSIP"}
+SCHEMES = {"TD-PRICES": "CUSIP", **dict.fromkeys(POSITIONING_SOURCES, "CFTC")}
+# Sources whose keys secmaster-svc isn't expected to know: the CFTC reports equity, crypto and volatility
+# markets too. Their unknown keys are still recorded (a code added later resolves and reloads), but the
+# metrics count them apart, so the unmapped-keys alert is about keys that should have mapped.
+UNMAPPED_EXPECTED = set(POSITIONING_SOURCES)
 # The New York Fed's field names, as mkt-data keeps them, and ours.
 NYFED_FIELDS = {"percentRate": "rate", "percentPercentile1": "rate_p1", "percentPercentile25": "rate_p25",
                 "percentPercentile75": "rate_p75", "percentPercentile99": "rate_p99", "volumeInBillions": "volume_bn",
                 "targetRateFrom": "target_low", "targetRateTo": "target_high", "intraDayHigh": "intraday_high",
                 "intraDayLow": "intraday_low", "stdDeviation": "std_dev"}
+# The CFTC's column names, as mkt-data keeps them, and ours (20 characters at most): the categories are
+# dealer, asset_mgr, lev_funds (the CFTC's "leveraged money"), other (other reportables), rept (total
+# reportable) and nonrept; tr_ counts traders, conc_ the 4- and 8-trader concentration ratios.
+CFTC_FIELDS = {
+    "open_interest_all": "oi",
+    **{f"{c}_positions_{side}{suffix}": f"{ours}_{side}"
+       for c, ours, sides in (("dealer", "dealer", "lss"), ("asset_mgr", "asset_mgr", "lss"),
+                              ("lev_money", "lev_funds", "lss"), ("other_rept", "other", "lss"),
+                              ("tot_rept", "rept", "ls"), ("nonrept", "nonrept", "ls"))
+       for side in [{"l": "long", "s": "short"}[x] for x in sides[:2]] + (["spread"] if len(sides) == 3 else [])
+       for suffix in ("", "_all")},
+    "traders_tot_all": "tr_total",
+    **{f"traders_{c}_{side}{suffix}": f"tr_{ours}_{side}"
+       for c, ours in (("dealer", "dealer"), ("asset_mgr", "asset_mgr"), ("lev_money", "lev_funds"),
+                       ("other_rept", "other"), ("tot_rept", "rept"))
+       for side in ("long", "short", "spread") for suffix in ("", "_all")},
+    **{f"conc_{kind}_le_{n}_tdr_{side}{suffix}": f"conc_{kind}{n}_{side}"
+       for kind in ("gross", "net") for n in (4, 8) for side in ("long", "short") for suffix in ("", "_all")},
+}
 # A source's field names that aren't ours: (source, its field) -> ours.
 FIELDS = {("TD-PRICES", "eod"): "price", ("FRB-H10-RATES", "value"): "rate", ("FRB-H10", "value"): "index",
-          **{(src, k): v for src in ("NYFED-SOFR", "NYFED-EFFR") for k, v in NYFED_FIELDS.items()}}
+          **{(src, k): v for src in ("NYFED-SOFR", "NYFED-EFFR") for k, v in NYFED_FIELDS.items()},
+          **{(src, k): v for src in POSITIONING_SOURCES for k, v in CFTC_FIELDS.items()}}
 # Source values golden doesn't use, by instrument short name: (source, first, last, why).
 GOLDEN_EXCLUDE: dict[str, list[tuple[str, date, date, str]]] = {
     # Bill, 2026-10-05: leave Treasury's 30-year gap in golden. H.15 has values on
@@ -88,7 +116,8 @@ GOLDEN_EXCLUDE: dict[str, list[tuple[str, date, date, str]]] = {
 GOLDEN_BATCH = 500
 # Near-raw units, and how to turn one into a decimal.
 UNITS = {"percent": Decimal(100), "per_100": Decimal(1),  # prices stay per 100 of face
-         "USD billions": Decimal(1), "index": Decimal(1)}
+         "USD billions": Decimal(1), "index": Decimal(1),
+         "contracts": Decimal(1), "traders": Decimal(1)}  # CFTC positions and trader counts, whole numbers
 # FX rates stay as printed, in the source's own direction: H.10's "JPY currency" (yen per dollar, or dollars
 # per unit for its $US series) and the ECB's "JPY per EUR".
 FX_UNIT = re.compile(r"^[A-Z]{3} (currency|per [A-Z]{3})$")
@@ -140,7 +169,10 @@ def _load_period(s: Session, up: Upstream, source: str, period: str, mapping: di
         if sec_id is None:
             unmapped[v.source_key] = unmapped.get(v.source_key, 0) + 1
             continue
-        key = (sec_id, date.fromisoformat(v.as_of), FIELDS.get((source, v.field), v.field))
+        field = FIELDS.get((source, v.field), v.field)
+        if len(field) > 20:
+            raise LoadError(f"{source} {period}: field {v.field!r} has no name of ours (add it to FIELDS)")
+        key = (sec_id, date.fromisoformat(v.as_of), field)
         if key in want:
             raise LoadError(f"{source} {period}: two values for {v.source_key} on {v.as_of} ({v.field})")
         want[key] = (_to_decimal(v.value, v.unit), v.observation_id, v.capture_id)

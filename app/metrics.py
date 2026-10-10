@@ -18,7 +18,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import aliased
 
 from app import coverage as coverage_mod
-from app import db, freshness, sanity
+from app import db, freshness, load, sanity
 from app.config import settings
 from app.models import (
     CoverageGap,
@@ -237,11 +237,17 @@ def render(s, calendars=None) -> str:
 
     unmapped = list(s.scalars(select(UnmappedKey).order_by(UnmappedKey.source, UnmappedKey.source_key)))
     per_source: dict[str, int] = {}
+    expected: dict[str, int] = {}
     for u in unmapped:
-        per_source[u.source] = per_source.get(u.source, 0) + 1
+        bucket = expected if u.source in load.UNMAPPED_EXPECTED else per_source
+        bucket[u.source] = bucket.get(u.source, 0) + 1
     out.metric("quote_svc_unmapped_keys", "gauge",
                "Source keys secmaster-svc has no instrument for (their values aren't loaded), by source.",
                [({"source": k}, n) for k, n in sorted(per_source.items())])
+    out.metric("quote_svc_out_of_scope_keys", "gauge",
+               "Keys of sources that report markets beyond the security master (the CFTC's equity, crypto and "
+               "volatility markets), not loaded and not alerted on, by source.",
+               [({"source": k}, n) for k, n in sorted(expected.items())])
     shown: dict[str, int] = {}
     key_samples = []
     for u in unmapped:
