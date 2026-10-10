@@ -114,6 +114,19 @@ def _prices_freshness(s, out: _Out, name, calendars) -> None:
     _prices_sanity(s, out, name, f["due"])
 
 
+def _source_freshness(s, out: _Out) -> None:
+    got = freshness.source_dates(s)
+    out.metric("quote_svc_source_last_date_timestamp_seconds", "gauge",
+               "The latest quote date of each fixing and positioning source.",
+               [({"source": k}, _day_epoch(v["last"])) for k, v in got.items() if v["last"]])
+    out.metric("quote_svc_source_late", "gauge",
+               "1 if a fixing or positioning source's latest quote is older than its limit in days "
+               "(quote_svc_source_stale_days): the source stopped publishing, or the capture or load stopped.",
+               [({"source": k}, int(v["late"])) for k, v in got.items()])
+    out.metric("quote_svc_source_stale_days", "gauge", "Each fixing and positioning source's limit, in calendar days.",
+               [({"source": k}, v["limit"]) for k, v in got.items()])
+
+
 def _prices_sanity(s, out: _Out, name, due) -> None:
     c = sanity.check(s, due)
     out.metric("quote_svc_prices_sanity_date_timestamp_seconds", "gauge",
@@ -259,6 +272,7 @@ def render(s, calendars=None) -> str:
                key_samples)
     _freshness(s, out, name, calendars or _calendars)
     _prices_freshness(s, out, name, calendars or _calendars)
+    _source_freshness(s, out)
     return out.text()
 
 

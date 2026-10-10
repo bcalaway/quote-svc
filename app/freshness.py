@@ -26,6 +26,15 @@ Treasury prices (TD-PRICES; mkt-data's docs/phase-3.md, step 4):
   securities aren't active; auctioned ones not yet issued have no price yet.
 - **Missing:** an outstanding security whose latest price is older than the
   due date.
+
+Fixings and positioning (mkt-data's docs/phase-4.md, step 6):
+
+- **Last date:** each source's latest quote date, and **late** when it's older than that source's
+  STALE_DAYS (calendar days, as of today in New York). Each threshold sits past the source's own rhythm
+  and its longest holiday gap: SOFR and EFFR come the next business day (Thanksgiving Wednesday's rate is
+  five days old by Monday), the ECB's the same day (Easter: Thursday's until Tuesday), H.10 weekly on
+  Mondays for the week before (a Friday's rate is ten days old just before the next release), the CFTC's
+  report on Friday for the Tuesday before, a business day later after a federal holiday.
 """
 
 import time
@@ -129,3 +138,19 @@ def check_prices(s: Session, calendars, now: datetime | None = None) -> dict:
         .group_by(Quote.sec_id)
     ).all())
     return {"due": due, "calendar_ok": ok, "last": last, "missing": sorted(i for i, d in last.items() if d < due)}
+
+
+# Calendar days a source's latest quote may be before it's late (see the docstring).
+STALE_DAYS = {"NYFED-SOFR": 5, "NYFED-EFFR": 5, "ECB-EXR": 6, "FRB-H10-RATES": 12, "FRB-H10": 12,
+              "CFTC-TFF": 14, "CFTC-TFF-COMBINED": 14}
+
+
+def source_dates(s: Session, now: datetime | None = None) -> dict[str, dict]:
+    """Each fixing and positioning source's latest quote date, its age in days and whether it's late."""
+    today = (now or datetime.now(NEW_YORK)).astimezone(NEW_YORK).date()
+    out = {}
+    for source, days in STALE_DAYS.items():
+        last = s.scalar(select(func.max(Quote.as_of)).where(Quote.source == source))  # ix_quote_source_as_of
+        age = (today - last).days if last else None
+        out[source] = {"last": last, "age": age, "late": last is None or age > days, "limit": days}
+    return out

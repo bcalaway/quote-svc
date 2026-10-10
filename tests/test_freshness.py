@@ -1,6 +1,6 @@
 """Whether the Treasury curve is in on time, and stuck series (app/freshness.py)."""
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from app import db, freshness
@@ -64,3 +64,19 @@ def test_an_unreachable_calendar_falls_back_to_weekdays(migrated_db):
     with db.session() as s:
         out = freshness.check(s, Down, _at(2026, 10, 13, 10))
     assert out["due"] == date(2026, 10, 12) and not out["calendar_ok"] and out["last"] == {}
+
+
+def test_fixing_and_positioning_sources_are_late_past_their_limit(migrated_db):
+    now = datetime(2026, 10, 13, 12, tzinfo=UTC)  # a Tuesday
+    loaded = datetime(2026, 10, 13, tzinfo=UTC)
+    with db.session() as s:
+        for src, day in (("NYFED-SOFR", date(2026, 10, 9)), ("CFTC-TFF", date(2026, 9, 22)),
+                         ("FRB-H10", date(2026, 10, 2))):
+            s.add(Quote(sec_id=1, source=src, as_of=day, field="rate", value=Decimal("0.04"), observation_id=1,
+                        capture_id=1, loaded_at=loaded))
+        s.commit()
+        got = freshness.source_dates(s, now)
+    assert got["NYFED-SOFR"] == {"last": date(2026, 10, 9), "age": 4, "late": False, "limit": 5}
+    assert got["CFTC-TFF"]["age"] == 21 and got["CFTC-TFF"]["late"]  # three weeks: a report missed
+    assert got["FRB-H10"]["age"] == 11 and not got["FRB-H10"]["late"]  # H.10 is weekly
+    assert got["ECB-EXR"] == {"last": None, "age": None, "late": True, "limit": 6}  # nothing loaded at all
