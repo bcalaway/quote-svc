@@ -1,8 +1,10 @@
-"""quote-svc: load new and revised Treasury CMT yields and Treasury prices from mkt-data.
+"""quote-svc: load new and revised Treasury CMT yields, Treasury prices, fixings and positioning from mkt-data.
 
 Runs whenever mkt-data marks the Asset `mkt_data_cmt_observations` (after
-each successful CMT capture) or `mkt_data_treasury_prices` (after a
-FedInvest capture or rebuild that added, changed or removed prices), so a
+each successful CMT capture), `mkt_data_treasury_prices` (after a
+FedInvest capture or rebuild that added, changed or removed prices), or
+`mkt_data_fixings` / `mkt_data_positioning` (after a fixings or CFTC capture
+that changed observations), so a
 new day's curve or prices reach the golden quotes within minutes, and
 nightly as a catch-up in case an event was missed. The work runs in the quote-svc container
 (POST /jobs/load), which re-reads only months whose newest capture changed;
@@ -26,20 +28,23 @@ from home_platform_jobs import call_app_job
 CMT_OBSERVATIONS = Asset("mkt_data_cmt_observations")
 # Marked by mkt-data's mkt_data__treasury_securities_capture and _rebuild when TD-PRICES changed.
 TREASURY_PRICES = Asset("mkt_data_treasury_prices")
+# Marked by mkt-data's mkt_data__futures_sources_capture when a fixing or a CFTC report changed (phase 4, step 6).
+FIXINGS = Asset("mkt_data_fixings")
+POSITIONING = Asset("mkt_data_positioning")
 
 
 @dag(
     dag_id="quote_svc__load",
     schedule=AssetOrTimeSchedule(
         timetable=CronTriggerTimetable("13 7 * * *", timezone="UTC"),  # nightly catch-up, 07:13 UTC
-        assets=CMT_OBSERVATIONS | TREASURY_PRICES,
+        assets=CMT_OBSERVATIONS | TREASURY_PRICES | FIXINGS | POSITIONING,
     ),
     start_date=datetime(2026, 10, 1, tzinfo=UTC),
     catchup=False,
     max_active_runs=1,
     dagrun_timeout=timedelta(hours=2),  # a rebuild after the backfill reads every month since 1962
     default_args={"retries": 3, "retry_delay": timedelta(minutes=10)},
-    tags=["quote-svc", "quotes", "treasury"],
+    tags=["quote-svc", "quotes", "treasury", "fixings", "cftc"],
     doc_md=__doc__,
 )
 def quote_load():
